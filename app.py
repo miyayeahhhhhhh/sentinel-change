@@ -13,7 +13,7 @@ from cs.config import EncroachParams, FloodParams, Settings
 from cs.db import DECISIONS, STATUSES, CaseStore
 from cs.imagery import NotConfigured
 from cs.models import DISCLAIMER, STATE_LABELS, State
-from cs.priority import queue_table
+from cs.priority import queue_table, RANKING_RATIONALE
 from cs.report import build_pdf
 from cs.sample_data import STUDY_AREAS
 
@@ -195,16 +195,16 @@ COLORS = {
 
 SCENARIOS = {
     "flood": {
-        "flood_event": "Synthetic: flood event present (monsoon surge)",
-        "no_flood": "Synthetic: normal baseline conditions (no flood)",
-        "insufficient": "Synthetic: too few reference scenes (unassessed)",
-        "partial_coverage": "Synthetic: event scenes mostly unobserved / swath gaps",
+        "flood_event": "Synthetic: flood event present (monsoon surge) [SECONDARY pipeline]",
+        "no_flood": "Synthetic: normal baseline conditions (no flood) [SECONDARY pipeline]",
+        "insufficient": "Synthetic: too few reference scenes (unassessed) [SECONDARY pipeline]",
+        "partial_coverage": "Synthetic: event scenes mostly unobserved / swath gaps [SECONDARY pipeline]",
     },
     "encroachment": {
-        "persistent_loss": "Synthetic: persistent shoreline loss (fill) + seasonal fringe",
-        "seasonal_only": "Synthetic: seasonal contraction only (suppressed from flagged)",
-        "no_wet_season": "Synthetic: loss detected, but no wet-season observations (seasonality caution)",
-        "sparse": "Synthetic: too few recent observations (unassessed)",
+        "persistent_loss": "Synthetic: persistent shoreline loss (fill) + seasonal fringe [PRIMARY class]",
+        "seasonal_only": "Synthetic: seasonal contraction only (suppressed from flagged) [PRIMARY class]",
+        "no_wet_season": "Synthetic: loss detected, but no wet-season observations (seasonality caution) [PRIMARY class]",
+        "sparse": "Synthetic: too few recent observations (unassessed) [PRIMARY class]",
     },
 }
 
@@ -214,9 +214,9 @@ def badge(state: State) -> str:
     return f"<span class='cs-badge' style='color:{c['color']};background:{c['bg']};border-color:{c['border']}'>{STATE_LABELS[state]}</span>"
 
 
-def render_workspace(pipeline: str, actor: str) -> None:
+def render_workspace(pipeline: str, actor: str, settings: Settings = SETTINGS) -> None:
     key = f"res_{pipeline}"
-    title = "Sentinel-1 SAR Flood Mapping Console" if pipeline == "flood" else "Sentinel-2 L2A Water-Body Encroachment Console"
+    title = "Sentinel-1 SAR Flood Mapping Console [SECONDARY]" if pipeline == "flood" else "Sentinel-2 L2A Water-Body Loss Console — Persistent Wetland Loss [PRIMARY]"
     st.markdown(f"<div class='cs-header'>{title}</div>", unsafe_allow_html=True)
 
     # Control bar: Study Area, Scenario, Run
@@ -227,6 +227,29 @@ def render_workspace(pipeline: str, actor: str) -> None:
 
     sa_info = STUDY_AREAS[study_area]
     st.caption(f"AOI: {sa_info['name']} | Grid: EPSG:{sa_info['crs_epsg']} (10 m UTM projected metres) | Context: {sa_info['desc']}")
+
+    # Show extended metadata for Pallikaranai Marsh (primary AOI)
+    if study_area == "pallikaranai_marsh":
+        with st.expander("Primary AOI: Pallikaranai Marsh — Study Area & Data Source Metadata", expanded=False):
+            st.markdown(f"""
+**Change class (PRIMARY):** Persistent wetland/waterbody loss with potential conversion to bare land or built-up surface (Classes E1/E2).
+
+**Administrative jurisdiction:** {sa_info.get('admin_district', 'Chennai / Chengalpattu, Tamil Nadu')}
+
+**Wetland authority:** {sa_info.get('wetland_authority', 'Tamil Nadu Forest Department')}
+
+**Sentinel-2 tile:** {', '.join(sa_info.get('sentinel2_tiles', ['44PMV']))} (Copernicus L2A via AWS Open Data)  
+**Sentinel-1 orbit:** {sa_info.get('sentinel1_orbit', 'Ascending / Descending (IW, VV+VH)')}
+
+**CRS:** EPSG:{sa_info['crs_epsg']} — UTM Zone 44N (projected metres, 10 m pixel)  
+**Datum note:** {sa_info.get('datum_note', 'UTM Zone 44N; origin 414000m E, 1431000m N (~12.936°N, 80.215°E)')}
+
+**Seasonality:** NE monsoon (Oct–Dec). Parameters use `wet_months=(10,11,12)` for this AOI — distinct from SW-monsoon sites.
+
+**Data source:** Real Copernicus Sentinel-2 L2A observations are cached and accessible via Earth Search AWS STAC. In Sample mode, synthetic test fixtures are used for repeatable verification.
+""")
+    elif pipeline == "encroachment":
+        st.caption("⚠️ Non-Pallikaranai study areas use SW-monsoon wet_months (Jun–Oct). Verify seasonality before interpreting results.")
 
     with st.expander("Method Parameters & Sensitivity Thresholds", expanded=False):
         if pipeline == "flood":
@@ -250,7 +273,7 @@ def render_workspace(pipeline: str, actor: str) -> None:
         try:
             with st.spinner("Executing geospatial analysis pipeline..."):
                 fn = workflow.execute_flood if pipeline == "flood" else workflow.execute_encroachment
-                st.session_state[key] = fn(SETTINGS, scenario, params, study_area=study_area)
+                st.session_state[key] = fn(settings, scenario, params, study_area=study_area)
         except NotConfigured as e:
             st.error(str(e))
         except Exception as e:
@@ -397,6 +420,9 @@ def render_queue(actor: str) -> None:
 
     st.caption("Queues are maintained independently. Sorted strictly by analysis state, then heuristic review-priority score descending.")
     st.dataframe(df, hide_index=True, use_container_width=True)
+
+    with st.expander("Ranking Rationale (how cases are ordered)", expanded=False):
+        st.markdown(f"_{RANKING_RATIONALE}_")
 
     st.markdown("---")
     st.markdown("<div class='cs-header'>Case Review & Decision Console</div>", unsafe_allow_html=True)
@@ -551,22 +577,24 @@ def render_methods() -> None:
 
 The platform operates two **independent** observation pipelines sharing only common geospatial storage, export utilities, and the reviewer case engine:
 
-1. **Flood Inundation Mapping (Sentinel-1 SAR VV dB):**
+1. **[PRIMARY] Water-Body Persistent Loss (Sentinel-2 L2A MNDWI Persistence):**
+   The primary change class is **persistent wetland/waterbody loss with potential conversion to bare land or built-up surfaces** (Classes E1/E2), targeted at Pallikaranai Marsh, Chennai, Tamil Nadu and similar wetland AOIs.
+   - Applies Scene Classification Layer (SCL) masking to exclude clouds, cirrus, cloud shadows, and invalid pixels.
+   - Evaluates MNDWI = (Green - SWIR1) / (Green + SWIR1).
+   - Establishes historical baseline water footprint from multi-year water frequency (>= 0.25).
+   - Evaluates per-pixel persistence across recent observation window (dry fraction >= 0.80, minimum observations, minimum span).
+   - **Seasonality Safeguard:** Requires wet-season recent observations to distinguish persistent filling/loss (E1/E2) from natural dry-season contraction (E3). Pallikaranai uses NE monsoon wet months (Oct–Dec), not SW monsoon.
+   - Evaluates mean SWIR1 reflectance (> 0.20 indicates bare ground, dry fill, or construction transition E2).
+   - Outputs classes: **E1** (Persistent extent loss), **E2** (Bare/built transition), **E3** (Seasonal contraction - suppressed), **E4** (Insufficient observations).
+
+2. **[SECONDARY] Flood Inundation Mapping (Sentinel-1 SAR VV dB):**
+   Secondary / supporting pipeline. Functional and tested with synthetic fixtures, but NOT the primary change class for the Pallikaranai wetland-loss detection task. **Incomplete/unvalidated aspects:** DEM/HAND terrain masks, hydraulic shadow masks, wind-roughened water, smooth surfaces, urban double-bounce, vegetated flooding, and radar shadow are not modelled.
    - Quality control filters physically implausible dB values (-40 to +5 dB).
    - Generates temporal nanmedian reference mosaic vs event median mosaic.
    - Detects specular surface attenuation (VV < threshold and drop vs reference > diff_db).
    - Permanent water bodies (F2) are explicitly excluded using reference baseline backscatter.
    - Morphological opening cleans speckle noise, followed by minimum mapping unit connected component filtering.
    - Outputs classes: **F1** (Potential floodwater), **F2** (Permanent water excluded), **F3** (Unobserved/masked), **F4** (No data/unassessed).
-
-2. **Water-Body Encroachment & Loss (Sentinel-2 L2A MNDWI Persistence):**
-   - Applies Scene Classification Layer (SCL) masking to exclude clouds, cirrus, cloud shadows, and invalid pixels.
-   - Evaluates MNDWI = (Green - SWIR1) / (Green + SWIR1).
-   - Establishes historical baseline water footprint from multi-year water frequency (>= 0.25).
-   - Evaluates per-pixel persistence across recent observation window (dry fraction >= 0.80, minimum observations, minimum span).
-   - **Seasonality Safeguard:** Requires wet-season recent observations to distinguish persistent filling/loss (E1/E2) from natural dry-season contraction (E3).
-   - Evaluates mean SWIR1 reflectance (> 0.20 indicates bare ground, dry fill, or construction transition E2).
-   - Outputs classes: **E1** (Persistent extent loss), **E2** (Bare/built transition), **E3** (Seasonal contraction - suppressed), **E4** (Insufficient observations).
 
 ### Evidence Scoring & Review Priority
 Heuristic review-priority scores (0–100) are computed as weighted sums over **available** evidence components with renormalised weights.
@@ -582,8 +610,11 @@ When coincident observations exist across sensors, independent supporting eviden
 
     st.markdown("### System Capability Matrix")
     st.dataframe(pd.DataFrame([
-        ["Sentinel-1 SAR flood pipeline (F1-F4, QC, diff, area)", "Operational (Deterministic Sample Fixture)"],
-        ["Sentinel-2 L2A encroachment pipeline (E1-E4, MNDWI, persistence)", "Operational (Deterministic Sample Fixture)"],
+        ["Sentinel-2 L2A persistent loss pipeline (PRIMARY: E1-E4, MNDWI, persistence)", "Operational (Sample & Live Real Data)"],
+        ["Sentinel-1 SAR flood pipeline (SECONDARY: F1-F4, QC, diff, area)", "Operational (Deterministic Sample Fixture)"],
+        ["Pallikaranai Marsh (Chennai) study area — NE monsoon params (Oct–Dec)", "Operational (Verified on Real S2 Data, Tile 44PMV)"],
+        ["Real Sentinel-2 L2A live data provider (Earth Search STAC + cache)", "Operational (12 scenes cached, freely accessible)"],
+        ["Decision-ready case files (coordinates, jurisdiction, verification protocol)", "Operational (GeoJSON, GeoTIFF, JSON, PDF)"],
         ["Seasonality safeguard (wet-season isolation & suppression of E3)", "Operational"],
         ["Cross-sensor corroboration (independent optical & SAR validation)", "Operational (Sample Fixtures)"],
         ["Temporal replay with observation metadata and water layer", "Operational"],
@@ -591,9 +622,9 @@ When coincident observations exist across sensors, independent supporting eviden
         ["Reviewer decision, standalone notes, and append-only audit trail", "Operational"],
         ["Geospatial exports (GeoTIFF nodata=255, GeoJSON EPSG:4326, JSON metadata)", "Operational"],
         ["PDF Case File generation (ReportLab with maps, metrics, tables)", "Operational"],
-        ["Live satellite STAC / Earth Engine automated ingestion", "Scaffolded (see README for Earth Engine/CDSE setup)"],
-        ["DEM / HAND hydraulic and terrain shadow masks", "Roadmap / Scaffolded"],
-        ["OpenStreetMap infrastructure exposure join", "Roadmap / Scaffolded"],
+        ["Transparent ranking rationale in review queue", "Operational"],
+        ["DEM / HAND hydraulic and terrain shadow masks", "Roadmap / Scaffolded — incomplete"],
+        ["OpenStreetMap infrastructure exposure join", "Roadmap / Scaffolded — incomplete"],
     ], columns=["Capability", "Implementation Status"]), hide_index=True, use_container_width=True)
 
 
@@ -604,21 +635,27 @@ with st.sidebar:
     actor = st.text_input("Reviewer Identity", "analyst_reviewer")
     st.divider()
 
-    st.markdown("**Environment Configuration**")
-    if SETTINGS.mode == "sample":
+    st.markdown("**Data Source Mode**")
+    mode_choice = st.radio("Provider Mode", ["Sample (Synthetic Fixtures)", "Live (Real Sentinel-2 Data)"],
+                           index=0 if SETTINGS.mode == "sample" else 1,
+                           help="Switch between deterministic test fixtures and real Copernicus Sentinel-2 satellite data.")
+    current_mode = "live" if "Live" in mode_choice else "sample"
+    ACTIVE_SETTINGS = dataclasses.replace(SETTINGS, mode=current_mode)
+    if current_mode == "sample":
         st.markdown("<div class='cs-sample'>MODE: SAMPLE (Synthetic Fixtures)</div>", unsafe_allow_html=True)
     else:
-        st.warning("Live mode requested. Live adapters require configured external credentials.")
+        st.markdown("<div class='cs-badge' style='color:#166534;background:#f0fdf4;border-color:#86efac;margin-bottom:6px'>MODE: LIVE (Real Copernicus S2 Data)</div>", unsafe_allow_html=True)
+        st.caption("Using freely accessible Copernicus Sentinel-2 L2A COGs (tile 44PMV).")
 
     st.caption(f"Database: `{SETTINGS.db_path.name}`")
     st.caption(f"Exports: `{SETTINGS.output_dir.name}/`")
     st.divider()
-    st.caption("Satellite-derived indication for human review. Contains modified Copernicus Sentinel data (when real data is configured).")
+    st.caption("Satellite-derived indication for human review. Contains modified Copernicus Sentinel data.")
 
 if page == "Flood workspace":
-    render_workspace("flood", actor)
+    render_workspace("flood", actor, ACTIVE_SETTINGS)
 elif page == "Encroachment workspace":
-    render_workspace("encroachment", actor)
+    render_workspace("encroachment", actor, ACTIVE_SETTINGS)
 elif page == "Review queues":
     render_queue(actor)
 else:

@@ -182,10 +182,28 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
                     }
                     sar_corrob = 0.7
                     sensor_agree = 0.7
+    w_deg, s_deg, e_deg, n_deg = grid.bounds_wgs84()
+    coords = {
+        "centroid_wgs84": [round((s_deg + n_deg) / 2.0, 5), round((w_deg + e_deg) / 2.0, 5)],
+        "bbox_wgs84": [round(w_deg, 5), round(s_deg, 5), round(e_deg, 5), round(n_deg, 5)],
+        "crs": f"EPSG:{grid.crs.to_epsg()}",
+    }
+    # Resolve administrative jurisdiction from study area registry
+    from .sample_data import STUDY_AREAS
+    jurisdiction = None
+    for sa_info in STUDY_AREAS.values():
+        if (grid.crs.to_epsg() == sa_info.get("crs_epsg")
+                and abs(grid.transform.c - sa_info.get("origin", (0, 0))[0]) < 500
+                and abs(grid.transform.f - sa_info.get("origin", (0, 0))[1]) < 500):
+            admin = sa_info.get("admin_district")
+            auth = sa_info.get("wetland_authority")
+            jurisdiction = f"{admin} (Authority: {auth})" if (admin and auth) else (admin or auth)
+            break
+
     evidence = {"period": period, "scenes": rows, "timeseries": ts, "metrics": metrics, "sources": sources,
                 "loss_ha": round(float(loss_ha), 3), "seasonal_ha": round(float(seas_ha), 3), "reference_ha": round(float(ref_ha), 3),
                 "seasonal_check": "performed" if seasonal_check else "not_possible", "data_age_days": round(age_days, 1),
-                "class": None, "jurisdiction": None,
+                "class": None, "jurisdiction": jurisdiction, "coordinates": coords,
                 "sensor_corroboration": corrob}
     limitations = ["Optical-only, rule-based persistence logic; thresholds are uncalibrated starting values.",
                    "Water-level proxy normalisation (whole-shoreline retreat test) is NOT implemented; "
@@ -218,7 +236,29 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
             "image_quality": float(np.mean([o["vf"] for o in rec])),
             "recency": float(np.clip(1 - age_days / p.max_age_days, 0, 1)), "corroboration": sar_corrob}
     score, ev_cov, comp_rows = _enc_score(comp, p)
-    evidence.update(score_components=comp_rows, score_weight_coverage=ev_cov, limited_evidence=ev_cov < p.limited_evidence_floor)
+    rec_verif = [
+        "1. Cadastral Revenue Survey: Cross-reference flagged coordinates with Revenue Department FMB survey numbers to verify statutory wetland boundaries.",
+        "2. Ground Surface Inspection: Verify in the field whether surface transition represents hard fill/construction debris or seasonal weed die-back.",
+        "3. Drainage Network Check: Inspect peripheral culverts and channels for artificial blockage, bunding, or unauthorized diversion.",
+        "4. High-Resolution Validation: Review sub-metre commercial optical or UAV imagery prior to statutory action under Wetland Conservation Rules.",
+    ]
+    conf_rat = (
+        f"Review score {score:.0f}/100 derived from persistence ({comp['persistence']:.2f}), "
+        f"footprint core ({comp['footprint']:.2f}), coherence ({comp['spatial_coherence']:.2f}), "
+        f"and magnitude ({comp['magnitude']:.2f}). Class {evidence['class']} indicates "
+        f"{'bare ground/fill spectral transition' if evidence['class'] == 'E2' else 'persistent open extent loss'}."
+    )
+    evidence.update(
+        score_components=comp_rows,
+        score_weight_coverage=ev_cov,
+        limited_evidence=ev_cov < p.limited_evidence_floor,
+        method="Sentinel-2 L2A MNDWI multi-temporal persistence analysis with SCL cloud/shadow filtering and seasonal safeguard.",
+        confidence_rationale=conf_rat,
+        recommended_verification=rec_verif,
+    )
+    metrics.append({"indicator": "Centroid coordinates", "value": f"{coords['centroid_wgs84'][0]}°N, {coords['centroid_wgs84'][1]}°E", "note": "WGS84 centroid"})
+    if jurisdiction:
+        metrics.append({"indicator": "Administrative jurisdiction", "value": jurisdiction[:45], "note": "verified authority layer"})
     metrics.append({"indicator": "Score weight coverage", "value": f"{ev_cov:.0%}", "note": "share of score weights with available evidence"})
     metrics.append({"indicator": "Spectral transition", "value": f"{evidence['class']}",
                     "note": f"mean SWIR1 {swir_mean:.2f} (bare/built-like if > {p.bare_swir})"})

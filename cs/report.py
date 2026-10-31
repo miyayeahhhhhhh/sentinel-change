@@ -46,8 +46,39 @@ def build_pdf(store: CaseStore, case_id: str, out_path: Path) -> Path:
         Spacer(1, 4), _p(c["summary"], BODY)]
     if Path(exp["preview_png"]).exists():
         s += [Paragraph("Map (analysis grid; red = flagged, grey = not assessed)", H), Image(exp["preview_png"], 85 * mm, 85 * mm)]
+    
+    # Decision-ready coordinates and jurisdiction
+    coords = ev.get("coordinates")
+    jur = ev.get("jurisdiction")
+    if coords or jur:
+        rows_geo = []
+        if coords:
+            c_lat, c_lon = coords.get("centroid_wgs84", ["-", "-"])
+            rows_geo.append(["Centroid (WGS84)", f"{c_lat}°N, {c_lon}°E (CRS: {coords.get('crs', '-')})"])
+            b_w, b_s, b_e, b_n = coords.get("bbox_wgs84", ["-", "-", "-", "-"])
+            rows_geo.append(["Bounding Box (WGS84)", f"West: {b_w}, South: {b_s}, East: {b_e}, North: {b_n}"])
+        if jur:
+            rows_geo.append(["Administrative Jurisdiction", jur])
+        s += [Paragraph("Geographic Location & Administrative Jurisdiction", H),
+              _table(rows_geo, [55 * mm, 115 * mm])]
+
     s += [Paragraph("Evidence indicators", H),
           _table([["Indicator", "Value", "Note"]] + [[m["indicator"], m["value"], m["note"]] for m in ev.get("metrics", [])], [65 * mm, 40 * mm, 65 * mm])]
+    
+    # Method and confidence rationale
+    rat = ev.get("confidence_rationale")
+    meth = ev.get("method")
+    if rat or meth:
+        s += [Paragraph("Method & Decision-Readiness Rationale", H)]
+        if meth:
+            s += [_p(f"<b>Method:</b> {meth}", BODY)]
+        if rat:
+            s += [_p(f"<b>Evidence / Priority Rationale:</b> {rat}", BODY)]
+
+    # Recommended verification protocol
+    rec_v = ev.get("recommended_verification")
+    if rec_v:
+        s += [Paragraph("Recommended Officer Verification Protocol", H)] + [_p(v, BODY) for v in rec_v]
     if ev.get("score_components"):
         s += [Paragraph("Score components (renormalised over available weights)", H),
               _table([["Component", "Normalised", "Weight", "Available"]] + [[r["name"], r["normalised"], r["weight"], r["available"]] for r in ev["score_components"]],

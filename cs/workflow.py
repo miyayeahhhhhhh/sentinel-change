@@ -1,6 +1,6 @@
 """Orchestration: provider -> pipeline -> export -> case record. Used by the UI and the tests."""
 from __future__ import annotations
-from .config import EncroachParams, FloodParams, Settings
+from .config import EncroachParams, FloodParams, Settings, encroach_params_for
 from .db import CaseStore
 from .encroach import run_encroachment
 from .exports import export_result
@@ -36,4 +36,6 @@ def execute_encroachment(settings: Settings, scenario: str, params: EncroachPara
         _, supp = provider.flood_scenes("no_flood" if scenario == "persistent_loss" else "flood_event", study_area=study_area)
     except Exception:
         supp = None
-    return _register(settings, run_encroachment(scenes, grid, params or EncroachParams(), supplementary_scenes=supp))
+    # Use study-area-specific defaults when no explicit params provided.
+    effective_params = params if params is not None else encroach_params_for(study_area)
+    return _register(settings, run_encroachment(scenes, grid, effective_params, supplementary_scenes=supp))

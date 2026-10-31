@@ -32,6 +32,30 @@ STUDY_AREAS = {
         "origin": (418000.0, 1485000.0),
         "desc": "Coastal wetland & peripheral waterbody fringe",
     },
+    # PRIMARY study area: Pallikaranai Marsh, Chennai, Tamil Nadu
+    # Marsh core: ~12.936°N, 80.215°E → UTM Zone 44N (EPSG:32644)
+    # UTM 44N easting ~414000, northing ~1431000 (verified against WGS84 → UTM44N projection)
+    # Grid covers ~2 km × 2 km at 10 m resolution (200×200 px) over the marsh reserve forest.
+    # Real Sentinel-2 MGRS tile: 44PMV (granule covers Chennai/Pallikaranai).
+    # Wet season: NE monsoon (Oct–Dec); dry season: Feb–May.
+    "pallikaranai_marsh": {
+        "name": "Pallikaranai Marsh (Chennai, TN) — Primary AOI",
+        "crs_epsg": 32644,
+        "origin": (414000.0, 1431000.0),
+        "desc": (
+            "PRIMARY: Persistent wetland/waterbody loss detection. "
+            "Pallikaranai Marsh, Chennai, Tamil Nadu. "
+            "NE monsoon wet season (Oct–Dec). "
+            "Live S2 tile: 44PMV. Admin: Chennai / Chengalpattu / Kancheepuram district boundary, "
+            "Greater Chennai Corporation / Sholinganallur."
+        ),
+        # Metadata fields for evidence traceability and case files
+        "admin_district": "Chennai / Chengalpattu (Sholinganallur Taluk), Tamil Nadu",
+        "wetland_authority": "Tamil Nadu Forest Department (Conservation Authority of Pallikaranai Marsh)",
+        "sentinel2_tiles": ["44PMV"],
+        "sentinel1_orbit": "Ascending / Descending (IW, VV+VH)",
+        "datum_note": "UTM Zone 44N (EPSG:32644); origin 414000m E, 1431000m N (~12.936°N, 80.215°E)",
+    },
 }
 
 
@@ -81,7 +105,12 @@ def flood_scenes(scenario: str = "flood_event", seed: int = 7, study_area: str =
     return grid, out
 
 
+# Wet-fraction lookup by month (SW monsoon regions: Jun–Oct peak)
 WET = {1: .3, 2: .2, 3: .1, 4: 0, 5: 0, 6: .3, 7: .8, 8: 1, 9: 1, 10: .8, 11: .6, 12: .4}
+
+# Pallikaranai Marsh uses NE monsoon (Oct–Dec peak). Separate lookup for correct seasonality.
+# Values represent approximate fractional water-extent variation through the year.
+WET_NE = {1: .5, 2: .4, 3: .3, 4: .2, 5: .1, 6: .1, 7: .1, 8: .15, 9: .2, 10: .7, 11: 1.0, 12: .9}
 HEAVY_CLOUD = {7, 19, 31}
 LIGHT_CLOUD = {2, 10, 14, 22, 26, 34}
 
@@ -92,6 +121,8 @@ def s2_scenes(scenario: str = "persistent_loss", seed: int = 11, study_area: str
     ratio = np.sqrt(((xx - 100) / 45.0) ** 2 + ((yy - 100) / 32.0) ** 2)
     fill = (xx >= 128) & (yy >= 85) & (yy <= 115)
     has_fill = scenario in ("persistent_loss", "no_wet_season", "sparse")
+    # Use NE-monsoon seasonal calendar for Pallikaranai; SW-monsoon for all others.
+    wet_lut = WET_NE if study_area == "pallikaranai_marsh" else WET
     scenes, i = [], -1
     for y in (2023, 2024, 2025):
         for m in range(1, 13):
@@ -100,7 +131,7 @@ def s2_scenes(scenario: str = "persistent_loss", seed: int = 11, study_area: str
                 continue
             if scenario == "no_wet_season" and y == 2025 and 6 <= m <= 10:
                 continue
-            water = ratio <= 0.88 + 0.12 * WET[m]
+            water = ratio <= 0.88 + 0.12 * wet_lut[m]
             if has_fill and (y, m) >= (2025, 1 if scenario == "no_wet_season" else 3):
                 water = water & ~fill
             g = np.where(water, 0.08, 0.10) + rng.normal(0, 0.008, (H, W))

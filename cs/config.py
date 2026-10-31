@@ -24,6 +24,10 @@ class Settings:
     gee_project: str = ""
     cdse_user: str = ""
     cdse_password: str = ""
+    neo4j_uri: str = ""
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -35,6 +39,10 @@ class Settings:
             gee_project=e.get("CS_GEE_PROJECT", ""),
             cdse_user=e.get("CS_CDSE_USER", ""),
             cdse_password=e.get("CS_CDSE_PASSWORD", ""),
+            neo4j_uri=e.get("CS_NEO4J_URI", ""),
+            neo4j_user=e.get("CS_NEO4J_USER", "neo4j"),
+            neo4j_password=e.get("CS_NEO4J_PASSWORD", ""),
+            neo4j_database=e.get("CS_NEO4J_DATABASE", "neo4j"),
         )
 
 
@@ -86,3 +94,44 @@ class EncroachParams:
 
     def to_dict(self) -> dict:
         return _jsonable(asdict(self))
+
+
+@dataclass(frozen=True)
+class DroughtParams:
+    mndwi_thr: float = 0.0           # water threshold (Green - SWIR1)/(Green + SWIR1)
+    min_scene_valid: float = 0.60    # scene usable if clear fraction >= this
+    recent_start: datetime = utc(2025, 1, 1)  # monitoring window start
+    min_baseline_obs: int = 4        # min same-season historical baseline passes
+    min_recent_obs: int = 2          # min recent event passes
+    ref_freq: float = 0.35           # baseline same-season water recurrence frequency
+    deficit_thr: float = 0.30        # area contraction fraction relative to baseline
+    min_pixels: int = 5              # minimum mapping unit
+    open_iter: int = 1
+    min_area_ha: float = 0.5         # minimum reportable contraction area
+    high_score: float = 60.0
+    limited_evidence_floor: float = 0.60
+    area_floor_ha: float = 0.5
+    area_cap_ha: float = 30.0
+    max_age_days: float = 30.0
+
+    def to_dict(self) -> dict:
+        return _jsonable(asdict(self))
+
+
+# Pallikaranai Marsh, Chennai — NE monsoon seasonality (Oct–Dec).
+# Differs from SW-monsoon default only in wet_months and recent_start.
+# recent_start covers the post-2023 period when urban expansion accelerated.
+# These are starting-value thresholds, not calibrated to field data.
+PALLIKARANAI_ENCROACH_PARAMS = EncroachParams(
+    wet_months=(10, 11, 12),          # NE monsoon: Oct, Nov, Dec
+    recent_start=utc(2024, 1, 1),     # monitor 2024-onwards against 2023 baseline
+    area_cap_ha=5.0,                  # marsh fragments tend to be smaller units
+)
+
+
+def encroach_params_for(study_area: str) -> EncroachParams:
+    """Return study-area-specific EncroachParams where documented; else default."""
+    if study_area == "pallikaranai_marsh":
+        return PALLIKARANAI_ENCROACH_PARAMS
+    return EncroachParams()
+

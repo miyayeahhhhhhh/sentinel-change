@@ -20,6 +20,7 @@ class State(str, Enum):
 class Pipeline(str, Enum):
     FLOOD = "flood"
     ENCROACH = "encroachment"
+    DROUGHT = "drought"
 
 
 STATE_LABELS = {
@@ -64,7 +65,7 @@ class Result:
 
 def failed_result(pipeline: Pipeline, grid: Grid, exc: Exception, params: dict) -> Result:
     h, w = grid.height, grid.width
-    key = "flood" if pipeline == Pipeline.FLOOD else "loss"
+    key = "flood" if pipeline == Pipeline.FLOOD else ("deficit" if pipeline == Pipeline.DROUGHT else "loss")
     return Result(
         pipeline=pipeline, state=State.FAILED,
         summary=f"Analysis failed: {type(exc).__name__}: {exc}",
