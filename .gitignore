@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local database & runtime outputs (keep directory structure)
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+outputs/*
+!outputs/.gitkeep
+
+# Environment variables & local secrets
+.env
+.env.local
+
+# Operating System & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Additional secrets and runtime files
+*.env
+*.db-wal
+*.db-shm
+*.pem
+*.key
+secrets.toml
+service-account*.json
+credentials.json
+
+# Downloaded satellite imagery and processing cache
+data/cache/
+
+# Local project backups
+backups/

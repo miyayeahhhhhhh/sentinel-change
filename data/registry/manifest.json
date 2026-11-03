@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "pilot": {
+    "region": "Hyderabad Metropolitan Region",
+    "district_id": "hyderabad-district",
+    "district_name": "Hyderabad",
+    "seasonal_profile": "sw_monsoon",
+    "selection_note": "Pilot unit is the Hyderabad district (project owner's 'Hyderabad pilot district'). The Hyderabad Metropolitan Region spans parts of several districts and no official HMDA boundary polygon has been retrieved, so the verified unit is the administrative district. Seasonal profile is an ASSUMED regime default, not yet validated."
+  },
+  "districts": [
+    {
+      "id": "hyderabad-district",
+      "name": "Hyderabad",
+      "file": "sources/2ca6d1d8b43c_hyderabad_district.geojson",
+      "sha256": "2ca6d1d8b43c5fbe2f357d7b8b915ad679f0ecaa8e7b2934d2d06877663f154c",
+      "source": {
+        "publisher": "Telangana Remote Sensing Applications Centre (TGRAC)",
+        "dataset": "District Boundary",
+        "url": "https://tgrac.telangana.gov.in/arcgis/rest/services/AdministrativeInfoSystem_Folder/Administrative_Information_System/MapServer/30",
+        "licence": "Not stated in source metadata; reuse terms unverified",
+        "retrieved_utc": "2026-10-31",
+        "vintage": ""
+      },
+      "crs": "EPSG:4326",
+      "feature_filter": {
+        "field": "District",
+        "value": "Hyderabad"
+      }
+    }
+  ],
+  "waterbodies": [
+    {
+      "id": "hussain-sagar",
+      "name": "Hussain Sagar",
+      "file": "sources/a0149665fae7_hussain_sagar.geojson",
+      "sha256": "a0149665fae70ebad09cbda5fdf0eb81195058690dbf315d077c2daf2d8ce6e6",
+      "source": {
+        "publisher": "Telangana Remote Sensing Applications Centre (TGRAC)",
+        "dataset": "Reservoirs",
+        "url": "https://tgrac.telangana.gov.in/arcgis/rest/services/TGIIC_Folder/BaseLayers/MapServer/16",
+        "licence": "Not stated in source metadata; reuse terms unverified",
+        "retrieved_utc": "2026-10-31",
+        "vintage": ""
+      },
+      "crs": "EPSG:4326",
+      "feature_filter": {
+        "field": "Name",
+        "value": "Hussain Sagar"
+      },
+      "district_id": "hyderabad-district"
+    }
+  ]
+}
