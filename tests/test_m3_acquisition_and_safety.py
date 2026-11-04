@@ -102,7 +102,7 @@ def test_search_follows_next_links(s2env, monkeypatch):
         def read(self): return json.dumps(self.p).encode()
     monkeypatch.setattr(imagery.urllib.request, "urlopen", lambda req, timeout=0: seen.append(req.full_url) or R(pages[len(seen) - 1]))
     out = prov._stac_search((78.4, 17.4, 78.41, 17.41), START, END, 20.0, 100)
-    assert [f["id"][-8:] for f in out] == ["20230101", "20230201"] and seen[1] == "https://x/p2"
+    assert [f["id"][-8:] for f in out] == ["20230201", "20230101"] and seen[1] == "https://x/p2"
 
 
 # ------------------------------------------------------------------ e-mail safety
@@ -155,7 +155,24 @@ def test_automatic_alert_is_skipped_for_synthetic_cases(settings, monkeypatch):
 
 
 # ------------------------------------------------------------------ scope, status, dashboard counts
-def test_scope_and_display_status_without_touching_stored_rows(settings):
+def _stub_live_fixed_grid_sources(monkeypatch):
+    from cs.imagery import LiveProvider
+    from cs.evidence.base import Unavailable
+    import cs.workflow as wf
+
+    def local_scenes(self, grid, cache_key, start, end, **kwargs):
+        scenes = [s for s in self._load_cached(self._cache_dir(cache_key), grid=grid) if start <= s.acquired <= end]
+        self.last_acquisition = {"status": "complete", "found": len(scenes), "cloud_filtered": 0,
+                                 "read_ok": len(scenes), "failed": 0, "scenes_in_window": len(scenes)}
+        return scenes
+
+    monkeypatch.setattr(LiveProvider, "s2_scenes_for_grid", local_scenes)
+    monkeypatch.setattr(wf, "acquire_evidence", lambda *a, **k: {
+        key: Unavailable(key, "isolated test source") for key in ("sentinel1", "dynamic_world", "jrc_gsw")})
+
+
+def test_scope_and_display_status_without_touching_stored_rows(settings, monkeypatch):
+    _stub_live_fixed_grid_sources(monkeypatch)
     _, syn = execute_encroachment(settings, "sparse")                                   # not_assessed, synthetic
     _, leg = execute_encroachment(dataclasses.replace(settings, mode="live"), "", study_area="pallikaranai_marsh")        # legacy grid, cached real scenes
     st = CaseStore(settings.db_path)
@@ -176,6 +193,7 @@ def test_scope_and_display_status_without_touching_stored_rows(settings):
 
 def test_dashboard_counts_exclude_synthetic_and_legacy(monkeypatch, tmp_path):
     from streamlit.testing.v1 import AppTest
+    _stub_live_fixed_grid_sources(monkeypatch)
     monkeypatch.setenv("CS_DB_PATH", str(tmp_path / "d.db")); monkeypatch.setenv("CS_OUTPUT_DIR", str(tmp_path / "o"))
     from cs.config import Settings
     s = Settings.from_env()

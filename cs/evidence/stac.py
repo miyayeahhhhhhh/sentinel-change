@@ -30,22 +30,34 @@ class PlanetaryComputer:
         self._tokens: dict[str, tuple[str, float]] = {}
 
     def search(self, collection: str, bbox, start: datetime | None = None, end: datetime | None = None,
-               query: dict | None = None, limit: int = 100, max_pages: int = 10) -> list[dict]:
+               query: dict | None = None, limit: int = 100, max_pages: int | None = None) -> list[dict]:
         body = {"collections": [collection], "bbox": [round(float(v), 5) for v in bbox], "limit": limit}
         if start and end:
             body["datetime"] = f"{start:%Y-%m-%dT%H:%M:%SZ}/{end:%Y-%m-%dT%H:%M:%SZ}"
         if query:
             body["query"] = query
-        items, url, page = [], f"{self.stac_url}/search", 0
-        while url and page < max_pages:
+        items, url, page, method, seen = [], f"{self.stac_url}/search", 0, "POST", set()
+        while url and (max_pages is None or page < max_pages):
+            page_key = (url, method, json.dumps(body, sort_keys=True) if method == "POST" else "")
+            if page_key in seen:
+                raise RemoteError("STAC pagination repeated a page request; search stopped to avoid silently omitting items")
+            seen.add(page_key)
             resp = self._http(url, body, self._hdr, self.timeout)
             items += resp.get("features", [])
             nxt = next((l for l in resp.get("links", []) if l.get("rel") == "next"), None)
-            if nxt and nxt.get("method", "GET").upper() == "POST":
-                url, body = nxt["href"], {**body, **(nxt.get("body") or {})}
+            if nxt:
+                url = nxt["href"]
+                method = nxt.get("method", "GET").upper()
+                if method == "POST":
+                    body = {**(body or {}), **(nxt.get("body") or {})}
+                else:
+                    body = None
             else:
                 url = None
             page += 1
+        if url:
+            raise RemoteError(f"STAC search stopped at the configured {max_pages}-page limit before all results were retrieved")
+        items.sort(key=lambda item: (item.get("properties") or {}).get("datetime") or "", reverse=True)
         return items
 
     def token(self, collection: str) -> str:

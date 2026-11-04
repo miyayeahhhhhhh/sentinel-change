@@ -144,12 +144,14 @@ def load_cached_scenes(cache_dir: Path, grid: Grid | None = None) -> list[Scene]
 
 # ---------------------------------------------------------------------------------------------- acquisition
 def acquire_scenes(pc: PlanetaryComputer, collection: str, req: EvidenceRequest, p: SarParams, cache_dir: Path,
-                   reader=read_to_grid, max_items: int = 400) -> tuple[list[Scene], dict]:
+                   reader=read_to_grid, max_items: int | None = None) -> tuple[list[Scene], dict]:
     """Discover, filter for compatibility, choose one orbit group, read onto the grid. Returns (scenes, report)."""
     if req.recent_start is None:
         raise NotConfigured("recent_start is required: SAR evidence compares a baseline and a recent window")
     bbox = footprint_wgs84(req.grid).bounds
-    items = pc.search(collection, bbox, req.start, req.end, limit=100)[:max_items]
+    items = pc.search(collection, bbox, req.start, req.end, limit=100)
+    if max_items is not None:
+        items = items[:max_items]
     report = {"endpoint": pc.stac_url, "collection": collection, "n_found": len(items), "excluded": {}}
     compat = []
     for it in items:

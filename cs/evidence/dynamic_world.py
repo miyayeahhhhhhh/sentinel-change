@@ -132,8 +132,8 @@ class CachedDWClient:
     """Wraps a client so a re-run for the same AOI grid + window + band set does not download again (results only; the
     cache holds real downloaded composites and is keyed on everything that changes them)."""
 
-    def __init__(self, inner, cache_dir):
-        self.inner, self.cache_dir = inner, cache_dir
+    def __init__(self, inner, cache_dir, force_refresh: bool = False):
+        self.inner, self.cache_dir, self.force_refresh = inner, cache_dir, force_refresh
 
     def available(self):
         return self.inner.available()
@@ -146,7 +146,7 @@ class CachedDWClient:
         import json
         from pathlib import Path
         f = Path(self.cache_dir) / f"dw_{self._key(grid, start, end)}.npz"
-        if f.exists():
+        if f.exists() and not self.force_refresh:
             try:
                 d = np.load(f, allow_pickle=False)
                 meta = json.loads(str(d["meta"]))
@@ -184,11 +184,12 @@ class DynamicWorldSource(EvidenceSource):
     role = "Land-cover probability change inside the candidate loss: water -> built / bare ground, with class probabilities preserved."
     requirements = "earthengine-api + Earth Engine access (CS_GEE_PROJECT; stored auth or CS_GEE_SERVICE_ACCOUNT + CS_GEE_KEY_FILE)."
 
-    def __init__(self, client=None, params: DwParams | None = None, settings: Settings | None = None):
+    def __init__(self, client=None, params: DwParams | None = None, settings: Settings | None = None,
+                 refresh: bool = False):
         self.params = params or DwParams()
         if client is None and settings is not None:
             client = CachedDWClient(EarthEngineDWClient(settings.gee_project, settings.gee_service_account, settings.gee_key_file),
-                                    settings.db_path.parent / "cache" / "dynamic_world")
+                                    settings.db_path.parent / "cache" / "dynamic_world", force_refresh=refresh)
         self.client = client
 
     @property

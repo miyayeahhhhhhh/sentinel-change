@@ -142,8 +142,6 @@ class LiveProvider:
         raise NotConfigured(f"No cached Sentinel-1 observations for '{study_area}' (acquisition not implemented).")
 
     # ---- registry AOIs: any grid, any UTM zone ---------------------------------------------------
-    MAX_PAGES = 10
-
     @staticmethod
     def _grid_stamp(grid: Grid) -> dict:
         return {"epsg": grid.crs.to_epsg(), "transform": [round(float(v), 6) for v in list(grid.transform)[:6]],
@@ -186,6 +184,7 @@ class LiveProvider:
                     self.last_acquisition = {"status": "failed", "error": str(exc)[:300]}
                     raise NotConfigured(f"Live Sentinel-2 acquisition for '{cache_key}' failed: {exc}") from exc
             scenes = [s for s in self._load_cached(cache_dir, "sentinel-2", grid) if start <= s.acquired <= end]
+            scenes.sort(key=lambda scene: scene.acquired, reverse=True)
             m = manifest or {}
             self.last_acquisition = {
                 "status": "complete" if (m.get("n_failed") == 0 and not m.get("search_failed")) else "partial",
@@ -202,8 +201,12 @@ class LiveProvider:
         """All items in the window, following STAC 'next' links (cloud filtering is done client-side so it is countable)."""
         body = {"collections": ["sentinel-2-l2a"], "bbox": [round(v, 5) for v in bbox], "limit": min(limit, 100),
                 "datetime": f"{start:%Y-%m-%dT%H:%M:%SZ}/{end:%Y-%m-%dT%H:%M:%SZ}"}
-        out, url, payload, nxt_method = [], STAC_SEARCH, body, "POST"
-        for _ in range(self.MAX_PAGES):
+        out, url, payload, nxt_method, seen = [], STAC_SEARCH, body, "POST", set()
+        while url:
+            page_key = (url, nxt_method, json.dumps(payload, sort_keys=True) if nxt_method == "POST" else "")
+            if page_key in seen:
+                raise RuntimeError("STAC pagination repeated a page request; acquisition stopped to avoid silently omitting scenes.")
+            seen.add(page_key)
             post = (nxt_method == "POST")
             req = urllib.request.Request(url, data=json.dumps(payload).encode() if post else None, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=self.settings.http_timeout_s) as resp:
@@ -214,6 +217,7 @@ class LiveProvider:
                 break
             url, nxt_method = nxt.get("href", url), nxt.get("method", "POST").upper()
             payload = {**payload, **(nxt.get("body") or {})} if nxt_method == "POST" else payload
+        out.sort(key=lambda f: (f.get("properties") or {}).get("datetime") or "", reverse=True)
         return out
 
     def _fetch_s2_stac(self, grid: Grid, cache_dir: Path, start: datetime, end: datetime, max_cloud: float, limit: int,

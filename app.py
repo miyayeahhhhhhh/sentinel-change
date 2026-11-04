@@ -19,7 +19,7 @@ from cs.config import SEASONAL_PROFILES, Settings, encroach_params_for
 from cs.db import DECISIONS, STATUSES, CaseStore
 from cs.imagery import NotConfigured
 from cs.models import DISCLAIMER, STATE_LABELS, State
-from cs.priority import queue_table, RANKING_RATIONALE
+from cs.priority import queue_table, filter_queue_by_case_id, RANKING_RATIONALE
 from cs.report import build_pdf
 from cs.integrations.sarvam import LANGUAGES
 from cs.integrations.native_report import build_native_report
@@ -224,7 +224,7 @@ def _render_acquisition(ev: dict) -> None:
     a = ev.get("acquisition")
     if not a:
         return
-    with st.expander("Sentinel-2 acquisition (found / read / failed / cloud-filtered)", expanded=ev.get("class") == "E4"):
+    with st.expander("Sentinel-2 acquisition details", expanded=False):
         c = st.columns(5)
         c[0].metric("Found", a.get("found") if a.get("found") is not None else "-")
         c[1].metric("Cloud-filtered", a.get("cloud_filtered") if a.get("cloud_filtered") is not None else "-")
@@ -271,7 +271,8 @@ def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
             c1.warning("No waterbody records are registered, so there is nothing to analyse. See the Pilot registry page.")
         else:
             wb_id = c1.selectbox("Waterbody / AOI", [w.id for w in reg.waterbodies],
-                                 format_func=lambda i: f"{reg.waterbody(i).name}  [{reg.waterbody(i).status}]")
+                                 format_func=lambda i: f"{reg.waterbody(i).name}  [{reg.waterbody(i).status}]",
+                                 key="selected_waterbody")
             sel = reg.waterbody(wb_id)
             if not sel.verified:
                 allow_unverified = c1.checkbox(f"Allow {sel.status} AOI (the case will be labelled '{sel.status}')", value=False)
@@ -280,7 +281,7 @@ def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
         st.caption(f"Pilot: {reg.pilot['district_name']} district, {reg.pilot['region']} | seasonal profile: "
                    f"{SEASONAL_PROFILES[profile].label}, wet months {base_params.wet_months} ({'validated' if SEASONAL_PROFILES[profile].validated else 'ASSUMED, not validated'})")
         if settings.mode != "live":
-            st.info("Registry AOIs need real imagery. Switch the sidebar to Live mode; sample mode never substitutes synthetic data for a real AOI.")
+            st.caption("Registry waterbody runs require Live mode; sample fixtures are not used for real AOIs.")
     else:
         keys = list(STUDY_AREAS)
         study_area = c1.selectbox("Fixed study grid", keys, format_func=lambda k: STUDY_AREAS[k]["name"])
@@ -290,9 +291,14 @@ def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
         base_params = encroach_params_for(study_area)
         st.caption(f"{info['desc']} | Grid: EPSG:{info['crs_epsg']} (10 m) | seasonal profile: {info['seasonal_profile']}, "
                    f"wet months {base_params.wet_months} (applied automatically; not overridden by the controls below)")
-    run = c3.button("Run analysis", type="primary", key="run_encroachment", width="stretch")
-    refresh = c3.checkbox("Refresh imagery", value=False, key="refresh_imagery", disabled=not target.startswith("Registry"),
-                          help="Ignore the local Sentinel-2 cache and query the STAC service again (already-read scenes are not re-downloaded).")
+    synthetic_target = bool(study_area and STUDY_AREAS[study_area].get("synthetic"))
+    run = c3.button("Run live analysis", type="primary", key="run_encroachment", width="stretch",
+                    disabled=settings.mode != "live" or synthetic_target)
+    if settings.mode != "live":
+        st.caption("Switch Provider Mode to Live to run an analysis. Sample mode cannot create a real observation case.")
+    elif synthetic_target:
+        st.caption("Choose a registered waterbody or the real legacy study area; synthetic grids cannot run in Live mode.")
+    refresh = True
 
     with st.expander("Method Parameters & Sensitivity Thresholds", expanded=False):
         a, b, c = st.columns(3)
@@ -316,7 +322,8 @@ def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
                     )
                     st.session_state[key] = (res, case_id)
                 elif study_area:
-                    res, case_id = workflow.execute_encroachment(settings, scenario, params, study_area=study_area)
+                    res, case_id = workflow.execute_encroachment(settings, scenario, params, study_area=study_area,
+                                                                 refresh=refresh, progress_callback=_update_progress)
                     st.session_state[key] = (res, case_id)
                 else:
                     st.error("Nothing to run: no analysis target is available.")
@@ -417,9 +424,8 @@ def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
         cat = mapview.layer_catalog(res, bnd)
         shown = []
         if res.state in (State.NOT_ASSESSED, State.FAILED):
-            st.warning(f"Nothing was analysed for this case: {ev.get('reason') or res.summary} "
-                       "Observation-coverage layers are hidden by default because they would only shade the whole AOI as a data gap; "
-                       "this is NOT a no-change result.")
+            with st.expander("Why no result map is available", expanded=False):
+                st.caption(f"{ev.get('reason') or res.summary} Observation-coverage layers are hidden by default; this is not a no-change result.")
         with st.expander("Map layers", expanded=False):
             cols = st.columns(len(cat))
             for col, (grp, names) in zip(cols, cat.items()):
@@ -519,9 +525,7 @@ def render_dashboard(settings: Settings = SETTINGS) -> None:
     else:
         st.info("No cases in this scope. Run an assessment in the Analysis workspace after selecting a valid study area or verified AOI.")
 
-    st.markdown("### Evidence integrity")
-    st.info("Missing imagery, missing credentials, insufficient coverage and failed processing are reported as unavailable, unassessed or failed. They are never converted into a clean/no-change finding.")
-    st.caption("All detections are screening indicators for human review, not legal findings or proof of unlawful activity.")
+    st.caption("Detections are screening indicators for human review. Unavailable evidence is recorded as unassessed.")
 
 
 def render_registry(settings: Settings) -> None:
@@ -575,22 +579,24 @@ def render_queue(actor: str) -> None:
     st.markdown("<div class='cs-header'>Reviewer Verification Queue</div>", unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns([1.5, 2.5, 1.5])
-    pl = "encroachment"
-    c1.markdown("**Queue:** potential encroachment")
+    available_pipelines = sorted({case["pipeline"] for case in STORE.list_cases()})
+    pl = c1.selectbox("Pipeline", ["(all)"] + available_pipelines, index=0)
+    pl = None if pl == "(all)" else pl
     states = c2.multiselect(
         "Filter by State",
         [s.value for s in State],
-        default=[State.HIGH.value, State.POTENTIAL.value, State.NOT_ASSESSED.value, State.FAILED.value]
+        default=[s.value for s in State]
     )
     status = c3.selectbox("Filter by Review Status", ["(any)"] + list(STATUSES))
 
-    scope_sel = st.radio("Scope", [scope_mod.PILOT, scope_mod.SYNTHETIC, scope_mod.LEGACY, "all"], horizontal=True, key="queue_scope",
+    scope_sel = st.radio("Scope", ["all", scope_mod.PILOT, scope_mod.SYNTHETIC, scope_mod.LEGACY], horizontal=True, key="queue_scope",
                          format_func=lambda s: "All (mixed - not for counting)" if s == "all" else scope_mod.SCOPE_LABELS[s])
-    cases = scope_mod.filter_scope(STORE.list_cases(pl, states, None if status == "(any)" else status), scope_sel)
-    df = queue_table(cases, pl)
+    cases = scope_mod.filter_scope(STORE.list_cases(pl, states or None, None if status == "(any)" else status), scope_sel)
+    df = filter_queue_by_case_id(queue_table(cases, pl),
+                                 st.text_input("Search cases by ID", placeholder="e.g. ENC-0003", key="case_id_search"))
 
     if df.empty:
-        st.info("No cases match the selected filters. Run an analysis in the Encroachment workspace to create a case record. Absence of cases is not proof of no change.")
+        st.info("No cases match the selected filters. Adjust the filters or run an analysis to create a case record.")
         return
 
     st.caption("Sorted strictly by analysis state, then heuristic review-priority score descending.")
@@ -605,6 +611,13 @@ def render_queue(actor: str) -> None:
     cid = st.selectbox("Select Case to Inspect", df["case_id"].tolist())
     c = STORE.get_case(cid)
 
+    jump_col, info_col = st.columns([1.35, 3.65])
+    if jump_col.button("Open Analysis Workspace →", key=f"open_analysis_{cid}", type="primary", width="stretch"):
+        st.session_state["target"] = "Registry waterbody (Hyderabad pilot)"
+        st.session_state["page_nav"] = "Analysis workspace"
+        st.rerun()
+    info_col.caption("Run a fresh satellite assessment from the Analysis workspace. This creates a new immutable case; it does not overwrite this case.")
+
     c_left, c_right = st.columns([3, 2], gap="large")
 
     with c_left:
@@ -614,11 +627,46 @@ def render_queue(actor: str) -> None:
             st.markdown("<div class='cs-sample'>SAMPLE DATA: Synthetic input fixture.</div>", unsafe_allow_html=True)
         st.write(c["summary"])
         st.caption("Sarvam AI generates a native-language companion report. Original evidence and measurements remain unchanged.")
+        with st.expander("Case data and evidence (full record)", expanded=False):
+            full_record = dict(c)
+            for field in ("geometry", "limitations", "params", "evidence", "exports"):
+                value = full_record.get(field)
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except (TypeError, ValueError):
+                        pass
+                full_record[field] = value
+            st.json(full_record, expanded=False)
 
         exp = json.loads(c["exports"])
         preview_path = Path(exp.get("preview_png", ""))
-        if preview_path.exists():
-            st.image(str(preview_path), caption="Raster analysis grid preview (red = flagged indicator, grey = unobserved; north-up grid, not a map-aligned overlay)", width=420)
+        if preview_path.is_file():
+            st.markdown("#### Raster analysis preview")
+            st.image(str(preview_path), caption="Analysis-grid preview · not georeferenced", width="stretch")
+
+        # Explicit human-review completion for insufficient-evidence cases.
+        # This records a reviewer decision; it deliberately does NOT rewrite the immutable algorithm state.
+        if c["state"] == State.NOT_ASSESSED.value:
+            prior_decisions = STORE.decisions(cid)
+            already_recorded = any(d.get("decision") == "insufficient_evidence" for d in prior_decisions)
+            with st.container(border=True):
+                st.markdown("#### Assessment outcome")
+                st.warning("The algorithm could not assess this case because usable imagery did not meet the required coverage. A reviewer may close the review as **insufficient evidence**, but cannot manually convert this into a successful satellite assessment.")
+                if already_recorded:
+                    st.success("Human review outcome already recorded: insufficient evidence. The analysis state remains not_assessed.")
+                else:
+                    with st.form(f"complete_insufficient_review_{cid}"):
+                        review_rationale = st.text_area("Reviewer rationale (recommended)", placeholder="Example: Reviewed the available imagery; baseline coverage is insufficient to determine waterbody change.")
+                        confirm_review = st.checkbox("I inspected the available evidence and agree this case cannot be assessed with the current imagery.", key=f"confirm_insufficient_{cid}")
+                        if st.form_submit_button("Complete review — insufficient evidence", type="primary"):
+                            if not confirm_review:
+                                st.error("Please confirm that you inspected the available evidence.")
+                            else:
+                                STORE.set_status(cid, "reviewed", actor)
+                                STORE.add_decision(cid, actor, "insufficient_evidence", review_rationale.strip() or "Reviewed; insufficient usable imagery to determine change.")
+                                st.success("Review completed. The case is recorded as reviewed — insufficient evidence; its algorithm state remains not_assessed.")
+                                st.rerun()
 
         # Reviewer Action Forms
         st.markdown("#### Reviewer Actions")
@@ -818,21 +866,21 @@ Heuristic review-priority scores (0-100), weights renormalised over available co
 with st.sidebar:
     st.markdown("### Change Sentinel")
     st.caption("Waterbody Encroachment Monitoring - Hyderabad pilot")
-    page = st.radio("Navigation", ["Dashboard", "Pilot registry", "Analysis workspace", "Case management", "Methods and readiness"], label_visibility="collapsed")
+    page = st.radio("Navigation", ["Dashboard", "Pilot registry", "Analysis workspace", "Case management", "Methods and readiness"], label_visibility="collapsed", key="page_nav")
     actor = st.text_input("Local operator label", "local_analyst", help="Audit attribution only. This is not a login or authentication mechanism.")
     st.divider()
 
     st.markdown("**Data Source Mode**")
-    mode_choice = st.radio("Provider Mode", ["Sample (Synthetic Fixtures)", "Live (Real Sentinel-2 Data)"],
+    mode_choice = st.radio("Provider Mode", ["Sample (Synthetic Fixtures)", "Live (Current Imagery + Evidence)"],
                            index=0 if SETTINGS.mode == "sample" else 1,
-                           help="Sample = deterministic synthetic test fixtures (never real places). Live = real Copernicus Sentinel-2 data.")
+                           help="Sample uses deterministic test fixtures. Live queries current imagery and attempts the integrated independent evidence sources.")
     current_mode = "live" if "Live" in mode_choice else "sample"
     ACTIVE_SETTINGS = dataclasses.replace(SETTINGS, mode=current_mode)
     if current_mode == "sample":
         st.markdown("<div class='cs-sample'>MODE: SAMPLE (Synthetic Fixtures)</div>", unsafe_allow_html=True)
     else:
         st.markdown("<div class='cs-badge' style='color:#166534;background:#f0fdf4;border-color:#86efac;margin-bottom:6px'>MODE: LIVE (Real Sentinel-2 Data)</div>", unsafe_allow_html=True)
-        st.caption("Copernicus Sentinel-2 L2A COGs via open Earth Search STAC.")
+        st.caption("Each run refreshes Sentinel-2, Sentinel-1, Dynamic World and JRC catalog/composite data when available. JRC is historical reference data.")
 
     st.caption(f"Database: `{SETTINGS.db_path.name}`")
     st.caption(f"Exports: `{SETTINGS.output_dir.name}/`")
@@ -849,3 +897,9 @@ elif page == "Case management":
     render_queue(actor)
 else:
     render_methods()
+
+
+# Optional Neo4j graph access panel (added by neo4j-extension).
+from cs.neo4j_dashboard_extension import render_neo4j_panel
+with st.expander("Neo4j Knowledge Graph", expanded=False):
+    render_neo4j_panel()

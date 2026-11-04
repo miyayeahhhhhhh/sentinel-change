@@ -5,13 +5,14 @@ import json
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 
+import numpy as np
 from shapely.geometry import mapping
 
 from .config import EncroachParams, Settings, encroach_params_for
 from .db import CaseStore
 from .encroach import run_encroachment
 from .evidence import EvidenceRequest, NotConfigured
-from .evidence.acquire import acquire_evidence
+from .evidence.acquire import acquire_evidence, source_states
 from .exports import export_result
 from .geo import grid_for_geometry, polygon_mask
 from .integrations.emailer import send_case_alert
@@ -20,7 +21,7 @@ from .imagery import LiveProvider, get_provider
 from .models import Result
 from .scope import email_block_reasons
 from .registry import Registry, analysis_aoi, area_km2, jurisdiction_text
-from .study_areas import STUDY_AREAS
+from .study_areas import STUDY_AREAS, make_grid
 
 
 def _register(settings: Settings, result: Result) -> tuple[Result, str]:
@@ -78,9 +79,42 @@ def _legacy_context(study_area: str) -> dict:
 
 
 def execute_encroachment(settings: Settings, scenario: str, params: EncroachParams | None = None,
-                         study_area: str = "synthetic_test_grid"):
-    """Fixed-grid study areas (legacy real-data validation grid, synthetic test grid)."""
+                         study_area: str = "synthetic_test_grid", refresh: bool = True, progress_callback=None):
+    """Run sample fixtures in sample mode; live fixed grids refresh real imagery and all configured evidence sources."""
     provider = get_provider(settings)
+    if settings.mode == "live":
+        info = STUDY_AREAS[study_area]
+        if info.get("synthetic"):
+            raise NotConfigured("A synthetic study grid cannot be used in Live mode. Select a registered waterbody or a real fixed study area.")
+        as_of = datetime.now(timezone.utc)
+        effective = encroach_params_for(study_area, base=params, as_of=as_of, recent_months=12)
+        start = effective.recent_start - timedelta(days=round(3 * 365.25))
+        grid = make_grid(study_area)
+        store = CaseStore(settings.db_path)
+        mark = store.last_run_id()
+        if progress_callback:
+            progress_callback("Searching the live catalog for Sentinel-2 observations through now...")
+        scenes = provider.s2_scenes_for_grid(grid, study_area, start, as_of, refresh=refresh,
+                                             progress_callback=progress_callback)
+        acquisition = getattr(provider, "last_acquisition", None) or {}
+        store.record_source_run("sentinel2", study_area,
+                                "succeeded" if acquisition.get("status") == "complete" else "partial",
+                                _acq_counts(acquisition), standin=False)
+        req = EvidenceRequest(grid, np.ones((grid.height, grid.width), dtype=bool), start, as_of,
+                              study_area, recent_start=effective.recent_start)
+        if progress_callback:
+            progress_callback("Refreshing Sentinel-1, Dynamic World and JRC evidence...")
+        outcomes = acquire_evidence(settings, req, refresh=refresh)
+        for name, outcome in outcomes.items():
+            _record_evidence_run(store, name, study_area, outcome, standin=False)
+        ctx = _legacy_context(study_area)
+        ctx["acquisition"] = acquisition
+        ctx["evidence_sources"] = source_states(outcomes)
+        analyzed = run_encroachment(scenes, grid, effective, context=ctx, evidence=outcomes, as_of=as_of)
+        result, case_id = _register(settings, analyzed)
+        store.set_run_case(study_area, case_id, mark)
+        return result, case_id
+
     grid, scenes = provider.s2_scenes(scenario, study_area=study_area)
     supp = None
     try:
@@ -99,7 +133,7 @@ def execute_encroachment_for_waterbody(settings: Settings, wb_id: str, params: E
                                        baseline_years: int = 3, registry: Registry | None = None,
                                        allow_unverified: bool = False, provider=None, evidence_outcomes: dict | None = None,
                                        pc=None, dw_client=None, s1_reader=None, jrc_reader=None,
-                                       refresh: bool = False, progress_callback=None):
+                                       refresh: bool = True, progress_callback=None):
     """Registry AOI run: polygon AOI (waterbody + buffer, clipped to the pilot district) on a UTM grid derived from it.
     Needs real imagery (live mode). Refuses unverified AOIs unless explicitly allowed (then the case says so)."""
     reg = registry or Registry.load(settings.registry_dir)
@@ -143,7 +177,7 @@ def execute_encroachment_for_waterbody(settings: Settings, wb_id: str, params: E
         progress_callback(f"Gathering supplementary evidence ({len(scenes)} S2 scenes loaded)...")
     print("[CS-TIMING] supplementary evidence: starting acquisition", flush=True)
     outcomes = evidence_outcomes if evidence_outcomes is not None else acquire_evidence(
-        settings, req, pc=pc, dw_client=dw_client, s1_reader=s1_reader, jrc_reader=jrc_reader)
+        settings, req, pc=pc, dw_client=dw_client, s1_reader=s1_reader, jrc_reader=jrc_reader, refresh=refresh)
     print(f"[CS-TIMING] supplementary evidence: acquisition function returned in {perf_counter() - evidence_started:.2f}s", flush=True)
     for k, o in outcomes.items():
         _record_evidence_run(store, k, wb.id, o, standin)

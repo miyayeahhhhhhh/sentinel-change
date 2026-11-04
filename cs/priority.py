@@ -27,10 +27,10 @@ RANKING_RATIONALE = (
 )
 
 
-def queue_table(cases: list[dict], pipeline: str) -> pd.DataFrame:
+def queue_table(cases: list[dict], pipeline: str | None = None) -> pd.DataFrame:
     rows = []
     for c in cases:
-        if c["pipeline"] != pipeline:
+        if pipeline and c["pipeline"] != pipeline:
             continue
         ev = json.loads(c["evidence"])
         rows.append({"case_id": c["case_id"], "state": c["state"], "status": display_status(c), "scope": SCOPE_LABELS[case_scope(c)],
@@ -46,3 +46,11 @@ def queue_table(cases: list[dict], pipeline: str) -> pd.DataFrame:
         return df
     df["_r"] = df["state"].map(_RANK)
     return df.sort_values(["_r", "score (heuristic)"], ascending=[True, False], na_position="last").drop(columns="_r").reset_index(drop=True)
+
+
+def filter_queue_by_case_id(df: pd.DataFrame, query: str | None) -> pd.DataFrame:
+    """Filter the already-complete queue by a literal, case-insensitive case-ID substring."""
+    query = (query or "").strip()
+    if not query:
+        return df
+    return df[df["case_id"].astype(str).str.contains(query, case=False, regex=False, na=False)].copy()

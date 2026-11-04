@@ -19,7 +19,7 @@ def make_pc(settings: Settings, transport=None) -> PlanetaryComputer:
 
 def acquire_evidence(settings: Settings, req: EvidenceRequest, pc: PlanetaryComputer | None = None, dw_client=None,
                      cache_root: Path | None = None, sources: tuple = ("sentinel1", "dynamic_world", "jrc_gsw"),
-                     s1_reader=None, jrc_reader=None) -> dict:
+                     s1_reader=None, jrc_reader=None, refresh: bool = False) -> dict:
     total_started = perf_counter()
     pc_started = perf_counter()
     pc = pc or make_pc(settings)
@@ -29,7 +29,8 @@ def acquire_evidence(settings: Settings, req: EvidenceRequest, pc: PlanetaryComp
     builders = {
         "sentinel1": lambda: Sentinel1Source(pc=pc, collection=settings.s1_collection, cache_dir=cache_dir,
                                              **({"reader": s1_reader} if s1_reader else {})),
-        "dynamic_world": lambda: DynamicWorldSource(client=dw_client, settings=None if dw_client else settings),
+        "dynamic_world": lambda: DynamicWorldSource(client=dw_client, settings=None if dw_client else settings,
+                                                       refresh=refresh),
         "jrc_gsw": lambda: JRCSurfaceWaterSource(pc, settings.jrc_collection, **({"reader": jrc_reader} if jrc_reader else {})),
     }
     for k in sources:
