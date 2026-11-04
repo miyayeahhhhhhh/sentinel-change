@@ -1,0 +1,26 @@
+THE CHANGE SENTINEL — GEOREFERENCED CASE MAP PATCH V2
+
+This package uses unique filenames to avoid overwriting your existing extension-fix folder or files.
+
+CONTENTS
+- apply_georeferenced_map_patch_v2.py
+- cs_case_map_overlay_v2.py
+- INSTALL_MAP_PATCH_V2.txt
+
+INSTALL
+1. Stop Streamlit with Ctrl+C.
+2. Extract the contents of this ZIP directly into your project root (the folder containing app.py).
+   Do NOT extract into the old extension-fix folder.
+3. From PowerShell in the project root, create a backup:
+   Copy-Item app.py app.py.before-georeferenced-map-v2.bak
+4. Apply the patch:
+   python .\apply_georeferenced_map_patch_v2.py .\app.py
+5. Install map dependencies if needed:
+   pip install folium streamlit-folium shapely
+6. Start the app:
+   streamlit run app.py
+
+The patch only edits app.py and adds the uniquely named module cs_case_map_overlay_v2.py.
+It does not overwrite cs/case_map.py, the old extension-fix folder, the database, or case records.
+
+If the patch says the expected preview block was not found, stop and share that message. It means app.py differs from the version this patch targets; do not force the edit.
