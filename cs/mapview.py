@@ -11,6 +11,7 @@ import json
 
 import folium
 import numpy as np
+import rasterio
 from folium import plugins
 from PIL import Image
 
@@ -202,5 +203,35 @@ def build_map(result: Result, shown: list[str], opacity: float = 0.7, replay_idx
     folium.LayerControl(collapsed=True).add_to(m)                                  # basemaps
     plugins.GroupedLayerControl(groups={g: fgs for g, fgs in groups.items() if fgs}, exclusive_groups=False,
                                 collapsed=True).add_to(m)
+    m.fit_bounds([[s, w], [n, e]])
+    return m
+
+
+def build_frequency_comparison_map(baseline_path, recent_path) -> folium.Map:
+    """Display same-grid, georeferenced baseline/recent observed-water frequency exports."""
+    with rasterio.open(baseline_path) as before_src, rasterio.open(recent_path) as after_src:
+        if (before_src.crs != after_src.crs or before_src.transform != after_src.transform or
+                (before_src.height, before_src.width) != (after_src.height, after_src.width)):
+            raise ValueError("Baseline and recent frequency rasters are not spatially aligned")
+        grid = Grid(before_src.transform, before_src.crs, before_src.height, before_src.width)
+        before = before_src.read(1).astype("float32")
+        after = after_src.read(1).astype("float32")
+        before[before == before_src.nodata] = np.nan
+        after[after == after_src.nodata] = np.nan
+
+    w, s, e, n = grid.bounds_wgs84()
+    m = folium.Map(location=[(s + n) / 2, (w + e) / 2], zoom_start=14, tiles=None, control_scale=True)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+    folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                     attr="Esri World Imagery", name="Esri imagery", show=False).add_to(m)
+    for label, values in (("Before · same-month baseline water frequency", before),
+                          ("After · recent water frequency (same months)", after)):
+        warped, bounds = web_mercator_overlay(values, grid, "bilinear", nodata=np.nan)
+        rgba = np.zeros(warped.shape + (4,), np.uint8)
+        rgba[..., :3] = _ramp(warped, 0.0, 1.0, (235, 242, 247), (15, 90, 180))
+        rgba[..., 3] = np.where(np.isfinite(warped), 220, 0)
+        folium.raster_layers.ImageOverlay(_uri(rgba), bounds=bounds, opacity=0.8, name=label,
+                                           interactive=False, show=label.startswith("Before")).add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
     m.fit_bounds([[s, w], [n, e]])
     return m

@@ -13,6 +13,7 @@ from cs.evidence.stac import PlanetaryComputer
 from cs.models import State
 from cs.sample_data import s2_scenes
 from cs.encroach import run_encroachment
+from cs.fusion import fuse
 from cs.workflow import execute_encroachment_for_waterbody
 from tests.m2_fixtures import AS_OF, FakeDW, fake_pc, jrc_item, make_jrc_reader, make_s1_reader, make_transport, s1_items
 from tests.test_stabilization import _FixtureProvider, reg  # noqa: F401  (fixture)
@@ -58,6 +59,8 @@ def test_unavailable_sources_do_not_change_result_or_invent_confidence(base):
     assert not any(comps[k] for k in ("sensor_agreement", "landcover_transition", "historical_water"))
     assert all("simulated outage" in v for k, v in r.evidence["evidence_sources"].items() if k != "sentinel2_mndwi")
     assert sum("did not contribute" in x for x in r.limitations) == 3
+    supported = run_encroachment(sc, g, evidence=_layers(b.arrays["loss"].astype(bool), g))
+    assert supported.score > r.score
 
 
 def test_single_source_detection_is_capped_when_independent_support_required(base):
@@ -82,6 +85,31 @@ def test_no_candidate_loss_stays_no_change_regardless_of_sources():
     g, sc = s2_scenes("seasonal_only")
     r = run_encroachment(sc, g, evidence={"sentinel1": Unavailable("sentinel1", "x")})
     assert r.state in (State.NO_CHANGE, State.NOT_ASSESSED) and r.score is None
+
+
+def test_no_candidate_fusion_keeps_source_availability_and_provenance(base):
+    g, _, _ = base
+    reason = Unavailable("sentinel1", "remote acquisition unavailable", provenance={"dataset": "RTC"})
+    available = EvidenceLayer("dynamic_world", "raster", g, {}, np.ones((g.height, g.width), bool),
+                              {"dataset": "Dynamic World", "baseline": {"n_images": 4}})
+    fused = fuse(np.zeros((g.height, g.width), bool),
+                 {"sentinel1": reason, "dynamic_world": available})
+    assert fused["sources"]["sentinel1"]["status"] == "not_evaluated"
+    assert fused["sources"]["sentinel1"]["source_status"] == "unavailable"
+    assert fused["sources"]["sentinel1"]["source_reason"] == "remote acquisition unavailable"
+    assert fused["sources"]["sentinel1"]["provenance"] == {"dataset": "RTC"}
+    assert fused["sources"]["dynamic_world"]["status"] == "not_evaluated"
+    assert fused["sources"]["dynamic_world"]["provenance"]["baseline"]["n_images"] == 4
+    assert fused["sources"]["jrc_gsw"]["status"] == "not_evaluated"
+    assert fused["sources"]["jrc_gsw"]["source_status"] == "not_requested"
+
+
+def test_successful_analysis_keeps_sentinel2_acquisition_summary(base):
+    g, scenes, _ = base
+    acquisition = {"status": "complete", "found": 7, "read_ok": 6, "failed": 0,
+                   "query": {"start": "2022-11-01T00:00:00+00:00", "end": "2026-11-01T00:00:00+00:00"}}
+    result = run_encroachment(scenes, g, context={"acquisition": acquisition})
+    assert result.evidence["acquisition"] == acquisition
 
 
 def _run(settings, registry, wb, **kw):

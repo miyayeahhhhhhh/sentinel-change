@@ -95,7 +95,7 @@ def build_pdf(store: CaseStore, case_id: str, out_path: Path) -> Path:
     if rec_v:
         s += [Paragraph("Recommended Officer Verification Protocol", H)] + [_p(v, BODY) for v in rec_v]
     if ev.get("score_components"):
-        s += [Paragraph("Score components (renormalised over available weights)", H),
+        s += [Paragraph("Heuristic score components (unavailable evidence earns no weight)", H),
               _table([["Component", "Normalised", "Weight", "Available"]] + [[r["name"], r["normalised"], r["weight"], r["available"]] for r in ev["score_components"]],
                      [60 * mm, 35 * mm, 35 * mm, 40 * mm])]
     s += [Paragraph("Observations", H),

@@ -16,11 +16,11 @@ def test_score_only_with_flagged_states():
         Result(state=State.HIGH, score=None, **kw)
 
 
-def test_score_weights_renormalise_and_cap_when_evidence_missing():
+def test_score_weights_account_for_unavailable_evidence_without_renormalising():
     from cs.config import EncroachParams
     assert abs(sum(encroach.ENC_WEIGHTS.values()) - 1) < 1e-9
     comp = {k: 1.0 for k in encroach.ENC_WEIGHTS}
     assert encroach._enc_score(comp, EncroachParams())[0] == 100.0
     sparse = {k: (1.0 if k == "recency" else None) for k in encroach.ENC_WEIGHTS}
     score, cov, _ = encroach._enc_score(sparse, EncroachParams())
-    assert cov < 0.6 and score <= 50.0
+    assert cov < 0.6 and score == 5.0

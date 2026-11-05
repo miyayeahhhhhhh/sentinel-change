@@ -104,6 +104,31 @@ def test_mask_overlay_does_not_paint_background():
     assert 0.002 < frac < 0.01                                                # ~100 of 40000 px, not the whole footprint
 
 
+def test_georeferenced_frequency_comparison_requires_aligned_rasters(tmp_path):
+    g = make_grid()
+    before = np.zeros((g.height, g.width), "float32")
+    after = np.ones((g.height, g.width), "float32")
+    before[20:30, 40:50] = 1
+    after[20:30, 40:50] = 0
+    before_path, after_path = tmp_path / "before.tif", tmp_path / "after.tif"
+    with rasterio.open(before_path, "w", driver="GTiff", height=g.height, width=g.width, count=1,
+                       dtype="float32", crs=g.crs, transform=g.transform, nodata=-9999) as dst:
+        dst.write(before, 1)
+    with rasterio.open(after_path, "w", driver="GTiff", height=g.height, width=g.width, count=1,
+                       dtype="float32", crs=g.crs, transform=g.transform, nodata=-9999) as dst:
+        dst.write(after, 1)
+    rendered = mapview.build_frequency_comparison_map(before_path, after_path).get_root().render()
+    assert "same-month baseline water frequency" in rendered
+    assert "recent water frequency (same months)" in rendered
+
+    misaligned = Grid(from_origin(g.transform.c + 10, g.transform.f, 10, 10), g.crs, g.height, g.width)
+    with rasterio.open(after_path, "w", driver="GTiff", height=misaligned.height, width=misaligned.width, count=1,
+                       dtype="float32", crs=misaligned.crs, transform=misaligned.transform, nodata=-9999) as dst:
+        dst.write(after, 1)
+    with pytest.raises(ValueError, match="not spatially aligned"):
+        mapview.build_frequency_comparison_map(before_path, after_path)
+
+
 def test_map_layers_are_independent_and_aoi_clipped():
     g, sc = s2_scenes("persistent_loss")
     aoi = np.zeros((g.height, g.width), bool); aoi[60:140, 60:180] = True

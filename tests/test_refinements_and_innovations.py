@@ -116,6 +116,15 @@ def test_all_export_files_generated_and_valid(settings):
     assert cov_path.exists()
     assert check_geotiff(cov_path, res.grid)
 
+    # Same-calendar-month before/after layers keep exact projected-grid metadata.
+    before_path = Path(exports["baseline_matched_frequency_tif"])
+    after_path = Path(exports["recent_matched_frequency_tif"])
+    assert before_path.exists() and after_path.exists()
+    assert check_geotiff(before_path, res.grid) and check_geotiff(after_path, res.grid)
+    with rasterio.open(before_path) as before, rasterio.open(after_path) as after:
+        assert before.crs == after.crs and before.transform == after.transform
+        assert before.nodata == after.nodata == -9999.0
+
     # 3. polygons.geojson
     poly_path = Path(exports["polygons_geojson"])
     assert poly_path.exists()

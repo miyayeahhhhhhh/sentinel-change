@@ -36,7 +36,7 @@ def test_feedback_does_not_rewrite_history_and_is_audited(settings):
     st.set_status(cid, "under_review", "alice")
     st.add_decision(cid, "alice", "natural_seasonal", "looks seasonal")
     after = st.get_case(cid)
-    assert after["evidence"] == before and after["state"] == "high_priority_review" and after["status"] == "under_review"
+    assert after["evidence"] == before and after["state"] == "potential_change_detected" and after["status"] == "under_review"
     actions = [a["action"] for a in st.audit(cid)]
     assert actions == ["case_created", "status_changed", "reviewer_decision"]
     assert st.decisions(cid)[0]["decision"] == "natural_seasonal"

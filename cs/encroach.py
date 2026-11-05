@@ -2,7 +2,7 @@
 Sentinel-1 / Dynamic World / JRC GSW are evidence sources attached to it (see cs/evidence); only what is
 actually integrated contributes to a result, and the case record states which.
 
-Classes (blueprint s2): E1 persistent extent loss, E2 filling/construction-like transition,
+Classes (blueprint s2): E1 persistent observed extent loss, E2 bare/built-like spectral signal,
 E3 likely seasonal (suppressed, logged), E4 insufficient evidence. Output = 'suspected encroachment':
 a change in observed water extent, never a legal finding.
 """
@@ -21,7 +21,7 @@ from .geo import Grid, clean_mask, mask_to_gdf, validate_grid
 from .models import Pipeline, Result, State, failed_result
 
 log = logging.getLogger(__name__)
-BAD_SCL = [0, 1, 3, 8, 9, 10, 11]   # nodata, saturated, cloud shadow, cloud med/high, cirrus, snow
+BAD_SCL = [0, 1, 2, 3, 7, 8, 9, 10, 11]   # nodata, saturated, dark/shadow, cloud shadow/low-probability cloud, cloud, cirrus, snow
 ENC_WEIGHTS = {"persistence": .20, "footprint": .15, "spatial_coherence": .15, "magnitude": .10,
                "sensor_agreement": .10, "image_quality": .10, "recency": .05, "corroboration": .05,
                "landcover_transition": .05, "historical_water": .05}
@@ -31,15 +31,18 @@ SOURCES = ["Contains modified Copernicus Sentinel-2 data (when real data is used
 
 def _enc_score(c: dict, p: EncroachParams):
     rows, num, den = [], 0.0, 0.0
+    total_weight = sum(ENC_WEIGHTS.values())
     for name, w in ENC_WEIGHTS.items():
         v = c.get(name)
         rows.append({"name": name, "normalised": None if v is None else round(float(v), 3),
-                     "weight": w, "available": v is not None})
+                     "weight": w, "available": v is not None,
+                     "weighted_contribution": 0.0 if v is None else round(w * float(v), 4)})
         if v is not None:
             num += w * float(v)
             den += w
-    coverage = den / sum(ENC_WEIGHTS.values())
-    score = 100.0 * num / den if den else 0.0
+    coverage = den / total_weight
+    # Missing evidence contributes no positive score; availability is reported separately.
+    score = 100.0 * num / total_weight if total_weight else 0.0
     if coverage < p.limited_evidence_floor:
         score = min(score, 50.0)
     return round(score, 1), round(coverage, 3), rows
@@ -66,26 +69,44 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
     if not aoi.any():
         raise ValueError("AOI mask is empty")
     px_ha = grid.pixel_area_m2() / 1e4
-    obs = []
+    scenes = list(scenes)
+    daily_scenes = {}
     for sc in sorted(scenes, key=lambda s: s.acquired):
         if sc.sensor != "sentinel-2":
             raise ValueError(f"Encroachment pipeline accepts Sentinel-2 only, got {sc.sensor}")
         g, s, scl = sc.bands["green"], sc.bands["swir1"], sc.bands["scl"]
         validate_grid(grid, green=g, swir1=s, scl=scl)
         valid = ~np.isin(scl, BAD_SCL) & aoi
+        daily_scenes.setdefault(sc.acquired.date(), []).append((sc, g, s, valid))
+    obs = []
+    for day, items in sorted(daily_scenes.items()):
+        valid_stack = np.stack([item[3] for item in items])
+        valid = valid_stack.any(axis=0)
+        # Mosaic same-day overlapping items pixel-wise so tile overlap is never counted
+        # as multiple independent temporal observations.
+        chosen = np.argmax(valid_stack, axis=0)
+        green = np.take_along_axis(np.stack([item[1] for item in items]), chosen[None], axis=0)[0]
+        swir = np.take_along_axis(np.stack([item[2] for item in items]), chosen[None], axis=0)[0]
+        mndwi = (green - swir) / (green + swir + 1e-6)
         vf = float(valid.sum() / aoi.sum())
-        mndwi = (g - s) / (g + s + 1e-6)
-        obs.append({"id": sc.scene_id, "date": sc.acquired, "vf": vf, "usable": vf >= p.min_scene_valid,
-                    "valid": valid, "water": (mndwi > p.mndwi_thr) & valid, "mndwi": mndwi, "swir": s})
+        ids = [item[0].scene_id for item in items]
+        obs.append({"id": ids[0] if len(ids) == 1 else f"DAILY-MOSAIC-{day.isoformat()}", "source_ids": ids,
+                    "date": items[0][0].acquired, "vf": vf, "usable": vf >= p.min_scene_valid,
+                    "valid": valid, "water": (mndwi > p.mndwi_thr) & valid, "mndwi": mndwi, "swir": swir})
     synthetic = all(s.synthetic for s in scenes) if scenes else True
     base = [o for o in obs if o["usable"] and o["date"] < p.recent_start]
     rec = [o for o in obs if o["usable"] and o["date"] >= p.recent_start]
-    rows = [{"scene_id": o["id"], "acquired": o["date"].isoformat(), "valid_frac": round(o["vf"], 3), "usable": o["usable"],
+    rows = [{"scene_id": o["id"], "source_scene_ids": o["source_ids"], "source_scene_count": len(o["source_ids"]),
+             "acquired": o["date"].isoformat(), "valid_frac": round(o["vf"], 3), "usable": o["usable"],
              "role": "baseline" if o["date"] < p.recent_start else "recent"} for o in obs]
     period = {"start": rows[0]["acquired"], "end": rows[-1]["acquired"]} if rows else {"start": None, "end": None}
     zeros = np.zeros((H, W), bool)
     arrays = {"loss": zeros, "seasonal": zeros, "ref_water": zeros, "observed": zeros, "aoi": aoi,
               "coverage": np.zeros((H, W), np.float32), "context": np.full((H, W), np.nan, np.float32),
+              "baseline_water_frequency": np.full((H, W), np.nan, np.float32),
+              "recent_water_frequency": np.full((H, W), np.nan, np.float32),
+              "baseline_matched_frequency": np.full((H, W), np.nan, np.float32),
+              "recent_matched_frequency": np.full((H, W), np.nan, np.float32),
               "water_stack": np.stack([np.where(o["valid"], o["water"], 255).astype("uint8") for o in obs])
               if obs else np.zeros((0, H, W), np.uint8)}
     sources = SOURCES
@@ -118,26 +139,72 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
     core = (bv >= 2) & (freq >= 0.5)
     rw, rv = sum(o["water"].astype(np.int16) for o in rec), sum(o["valid"].astype(np.int16) for o in rec)
     dry = np.where(rv > 0, 1 - rw / np.maximum(rv, 1), 0.0)
-    last_water = np.zeros((H, W), bool)
-    seen = np.zeros((H, W), bool)
-    for o in rec:                                         # most recent valid observation per pixel
-        last_water = np.where(o["valid"], o["water"], last_water)
-        seen |= o["valid"]
-    cand = ref & (rv >= p.min_pixel_obs) & (dry >= p.persist) & seen & ~last_water
+    # Compare each recent calendar month only with baseline acquisitions from the same
+    # month. This avoids confusing recurring seasonal water variation with a change.
+    # Existing count, water-frequency and persistence parameters are reused as-is.
+    expected_recent_water = np.zeros((H, W), np.int16)
+    expected_recent_valid = np.zeros((H, W), np.int16)
+    comparable_recent_valid = np.zeros((H, W), np.int16)
+    matched_bw, matched_bv = np.zeros((H, W), np.int16), np.zeros((H, W), np.int16)
+    matched_rw, matched_rv = np.zeros((H, W), np.int16), np.zeros((H, W), np.int16)
+    last_expected_water = np.zeros((H, W), bool)
+    seen_expected = np.zeros((H, W), bool)
+    matched_months = []
+    for month in sorted({o["date"].month for o in rec}):
+        hist = [o for o in base if o["date"].month == month]
+        recent = [o for o in rec if o["date"].month == month]
+        if not hist:
+            continue
+        matched_months.append(month)
+        hb = sum(o["water"].astype(np.int16) for o in hist)
+        hv = sum(o["valid"].astype(np.int16) for o in hist)
+        rb = sum(o["water"].astype(np.int16) for o in recent)
+        rv_month = sum(o["valid"].astype(np.int16) for o in recent)
+        matched_bw += hb
+        matched_bv += hv
+        matched_rw += rb
+        matched_rv += rv_month
+        hist_month_usable = hv >= p.min_wet_pixel_obs
+        comparable_recent_valid += np.where(hist_month_usable, rv_month, 0)
+        historically_wet = hist_month_usable & (hb / np.maximum(hv, 1) >= p.ref_freq)
+        expected_recent_valid += np.where(historically_wet, rv_month, 0)
+        expected_recent_water += np.where(historically_wet, rb, 0)
+        for o in recent:
+            eligible = o["valid"] & historically_wet
+            last_expected_water = np.where(eligible, o["water"], last_expected_water)
+            seen_expected |= eligible
+    month_comparable = comparable_recent_valid >= p.min_pixel_obs
+    seasonal_comparable = ref & month_comparable
+    seasonal_coverage = float(seasonal_comparable.sum() / max(ref.sum(), 1))
+    matched_dry = 1 - expected_recent_water / np.maximum(expected_recent_valid, 1)
+    month_candidate = (ref & (expected_recent_valid >= p.min_pixel_obs) & (matched_dry >= p.persist) &
+                       seen_expected & ~last_expected_water)
     wet_rec = [o for o in rec if o["date"].month in p.wet_months]
-    seasonal_check = len(wet_rec) >= p.min_wet_scenes
-    if seasonal_check:
-        ww, wv = sum(o["water"].astype(np.int16) for o in wet_rec), sum(o["valid"].astype(np.int16) for o in wet_rec)
-        wet_dry = np.where(wv > 0, 1 - ww / np.maximum(wv, 1), 0.0)
-        confirmed = cand & (wv >= p.min_wet_pixel_obs) & (wet_dry >= p.persist)
-        seasonal = clean_mask(cand & ~confirmed, p.min_pixels, p.open_iter)
-    else:
-        confirmed, seasonal = cand, zeros
-    loss = clean_mask(confirmed, p.min_pixels, p.open_iter)
+    seasonal_check = seasonal_coverage >= p.min_scene_valid
+    if seasonal_coverage < p.min_scene_valid:
+        arrays.update(
+            ref_water=ref, observed=(rv > 0) & aoi, coverage=(rv / len(rec)).astype("float32") * aoi,
+            baseline_water_frequency=np.divide(bw, bv, out=np.full((H, W), np.nan, np.float32), where=bv > 0),
+            recent_water_frequency=np.divide(rw, rv, out=np.full((H, W), np.nan, np.float32), where=rv > 0),
+            baseline_matched_frequency=np.divide(matched_bw, matched_bv, out=np.full((H, W), np.nan, np.float32), where=matched_bv > 0),
+            recent_matched_frequency=np.divide(matched_rw, matched_rv, out=np.full((H, W), np.nan, np.float32), where=matched_rv > 0),
+        )
+        return not_assessed(
+            f"same-calendar-month comparison covers only {seasonal_coverage:.0%} of the historical water footprint "
+            f"(need >= {p.min_scene_valid:.0%})",
+            {"seasonal_comparison": {"status": "insufficient", "months_compared": matched_months,
+                                     "historical_footprint_coverage": round(seasonal_coverage, 3)}})
+    all_season_candidate = ref & (rv >= p.min_pixel_obs) & (dry >= p.persist)
+    seasonal = clean_mask(all_season_candidate & ~month_candidate, p.min_pixels, p.open_iter)
+    loss = clean_mask(month_candidate, p.min_pixels, p.open_iter)
     cov = (rv / len(rec)).astype("float32") * aoi
     last = max((o for o in obs if o["usable"]), key=lambda o: o["date"])
     arrays.update(loss=loss, seasonal=seasonal, ref_water=ref, observed=(rv > 0) & aoi, coverage=cov,
-                  context=last["mndwi"].astype("float32"))
+                  context=last["mndwi"].astype("float32"),
+                  baseline_water_frequency=np.divide(bw, bv, out=np.full((H, W), np.nan, np.float32), where=bv > 0),
+                  recent_water_frequency=np.divide(rw, rv, out=np.full((H, W), np.nan, np.float32), where=rv > 0),
+                  baseline_matched_frequency=np.divide(matched_bw, matched_bv, out=np.full((H, W), np.nan, np.float32), where=matched_bv > 0),
+                  recent_matched_frequency=np.divide(matched_rw, matched_rv, out=np.full((H, W), np.nan, np.float32), where=matched_rv > 0))
     age_days = (as_of - last["date"]).total_seconds() / 86400
     loss_ha, seas_ha, ref_ha = loss.sum() * px_ha, seasonal.sum() * px_ha, ref.sum() * px_ha
     n_unusable = sum(1 for o in obs if not o["usable"])
@@ -150,10 +217,12 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
         {"indicator": "Historical footprint (baseline)", "value": f"{ref_ha:.2f} ha", "note": f"water frequency >= {p.ref_freq}"},
         {"indicator": "Potential persistent extent loss", "value": f"{loss_ha:.2f} ha", "note": "UTM pixel area"},
         {"indicator": "Area uncertainty (boundary pixels)", "value": "", "note": ""},
-        {"indicator": "Likely seasonal contraction (E3, suppressed)", "value": f"{seas_ha:.2f} ha" if seasonal_check else "not separable",
-         "note": "dry in recent period but wet in wet-season observations" if seasonal_check else "no wet-season observations"},
+        {"indicator": "Seasonally unmatched contraction (E3, suppressed)", "value": f"{seas_ha:.2f} ha" if seasonal_check else "not separable",
+         "note": "recently dry pixels did not persist against the same-calendar-month baseline" if seasonal_check else "same-month comparison unavailable"},
         {"indicator": "Usable observations (baseline / recent)", "value": f"{len(base)} / {len(rec)}", "note": f"{n_unusable} excluded as cloudy/low-quality"},
-        {"indicator": "Wet-season recent observations", "value": len(wet_rec), "note": f"seasonal check {'performed' if seasonal_check else 'NOT possible'}"},
+        {"indicator": "Same-month comparison coverage", "value": f"{seasonal_coverage:.0%}",
+         "note": f"historical water footprint with sufficient same-month baseline and recent observations; months {matched_months}; remainder unassessed"},
+        {"indicator": "Wet-season recent observations", "value": len(wet_rec), "note": "context only; seasonality safeguard uses same-calendar-month comparison"},
         {"indicator": "Data age at analysis", "value": f"{age_days:.0f} days", "note": "since last usable observation"},
     ]
     sar_corrob = None
@@ -219,7 +288,13 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
     srcs_state.setdefault("sentinel2_mndwi", "used")
     for k, src_rec in fus["sources"].items():
         st = src_rec["status"]
-        srcs_state[k] = "used" if st == "assessed" else (st if st in ("not_requested", "not_evaluated") else f"{st}: {src_rec.get('reason', '')}")
+        source_status = src_rec.get("source_status")
+        if st == "not_evaluated" and source_status == "not_requested":
+            srcs_state[k] = "not_requested"
+        elif st == "not_evaluated" and source_status not in (None, "available"):
+            srcs_state[k] = f"{source_status}: {src_rec.get('source_reason', '')}"
+        else:
+            srcs_state[k] = "used" if st == "assessed" else (st if st in ("not_requested", "not_evaluated") else f"{st}: {src_rec.get('reason', '')}")
     if s1_new:
         sensor_agree = fus["components"]["sensor_agreement"]
         corrob = {"status": "assessed", "reason": "Sentinel-1 water-frequency evidence (baseline vs recent, one orbit group).", **fus["sources"]["sentinel1"]}
@@ -230,42 +305,50 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
     evidence = {"period": period, "scenes": rows, "timeseries": ts, "metrics": metrics, "sources": sources,
                 "loss_ha": round(float(loss_ha), 3), "seasonal_ha": round(float(seas_ha), 3), "reference_ha": round(float(ref_ha), 3),
                 "seasonal_check": "performed" if seasonal_check else "not_possible", "data_age_days": round(age_days, 1),
+                "wet_season_check": "performed" if len(wet_rec) >= p.min_wet_scenes else "not_possible",
+                "seasonal_comparison": {"status": "assessed", "months_compared": matched_months,
+                                        "historical_footprint_coverage": round(seasonal_coverage, 3),
+                                        "unassessed_footprint_share": round(1.0 - seasonal_coverage, 3),
+                                        "rationale": "recent calendar months are compared with baseline observations from the same months"},
                 "class": None, "jurisdiction": jurisdiction, "coordinates": coords,
+                "acquisition": context.get("acquisition"),
                 "sensor_corroboration": corrob, "aoi": context.get("aoi"), "evidence_sources": srcs_state,
                 "evidence_fusion": {"sources": fus["sources"], "supported_by": fus["supported_by"], "contradicted_by": fus["contradicted_by"]}}
     limitations = ["Optical-only, rule-based persistence logic; thresholds are uncalibrated starting values.",
-                   "Water-level proxy normalisation (whole-shoreline retreat test) is NOT implemented; "
-                   "seasonality is handled via wet-season persistence only.",
+                   "Month matching reduces recurring seasonal confounding but does not measure water level or eliminate interannual hydrologic variation.",
                    "Sentinel-1 SAR corroboration is evaluated against recent SAR passes when available; absence of SAR corroboration is not automatic disproof.",
                    "A change in observed water extent is not proof of illegal encroachment, ownership or intent."]
     for k, label in (("sentinel1", "Sentinel-1 SAR"), ("dynamic_world", "Dynamic World land cover"), ("jrc_gsw", "JRC Global Surface Water")):
         st = srcs_state.get(k, "")
         if st not in ("used",) and not (k == "sentinel1" and sar_corrob is not None):
             limitations.append(f"{label} did not contribute to this result ({st or 'unavailable'}); its absence is not evidence of no change.")
-    if not seasonal_check:
-        limitations.insert(0, "No wet-season observations in the recent window: natural seasonal contraction cannot be excluded.")
+    if len(wet_rec) < p.min_wet_scenes:
+        limitations.insert(0, "Too few recent observations in the configured wet months: interannual seasonal contraction cannot be excluded; this result is capped below high-priority status. The profile is unvalidated.")
+    if seasonal_coverage < 1.0:
+        limitations.append(f"Only {seasonal_coverage:.0%} of the historical water footprint met the same-month observation-coverage rule; the remainder is unassessed, not no-change.")
     if synthetic:
         limitations.append("Inputs are SYNTHETIC fixtures; results are not satellite detections.")
     if loss_ha < p.min_area_ha:
         return Result(Pipeline.ENCROACH, State.NO_CHANGE,
-                      f"No persistent water-extent loss above {p.min_area_ha} ha across {len(rec)} usable recent observations "
-                      f"({len(base)} baseline).", evidence, limitations, p.to_dict(), grid, arrays, "loss",
+                      f"No persistent water-extent loss above {p.min_area_ha} ha was detected in the seasonally comparable "
+                      f"{seasonal_coverage:.0%} of the historical footprint ({len(rec)} usable recent, {len(base)} baseline observations). "
+                      "The remainder is unassessed.", evidence, limitations, p.to_dict(), grid, arrays, "loss",
                       mask_to_gdf(loss, grid), None, synthetic)
     boundary = loss & ~ndi.binary_erosion(loss)
     unc = float(boundary.sum() * px_ha)
-    swir_mean = float(np.mean([o["swir"][loss].mean() for o in rec]))
+    swir_values = [o["swir"][loss & o["valid"]] for o in rec if np.any(loss & o["valid"])]
+    swir_mean = float(np.concatenate(swir_values).mean())
     evidence["class"] = "E2" if swir_mean > p.bare_swir else "E1"
     evidence["mean_swir1_reflectance"] = round(swir_mean, 3)
     metrics[2].update(value=f"+/- {unc:.2f} ha", note="boundary pixel count x pixel area")
-    dry_cnt = (rv - rw)[loss]
     lab, n = ndi.label(loss)
     sizes = ndi.sum(loss, lab, np.arange(1, n + 1))
-    comp = {"persistence": float(min(1.0, dry_cnt.mean() / 6.0) * dry[loss].mean()),
+    comp = {"persistence": float(matched_dry[loss].mean()),
             "footprint": float(core[loss].mean()),
             "spatial_coherence": float(sizes[sizes >= 4 * p.min_pixels].sum() / sizes.sum()),
             "magnitude": float(np.clip((loss_ha - p.area_floor_ha) / (p.area_cap_ha - p.area_floor_ha), 0, 1)),
             "sensor_agreement": sensor_agree,
-            "image_quality": float(np.mean([o["vf"] for o in rec])),
+            "image_quality": float(seasonal_coverage * np.mean([o["vf"] for o in rec])),
             "recency": float(np.clip(1 - age_days / p.max_age_days, 0, 1)), "corroboration": sar_corrob,
             "landcover_transition": fus["components"].get("landcover_transition"),
             "historical_water": fus["components"].get("historical_water")}
@@ -274,9 +357,12 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
     if fus["contradicted_by"]:
         score = min(score, 50.0)
         support["notes"].append("Score capped at 50: independent evidence disagrees (" + ", ".join(fus["contradicted_by"]) + ").")
-    elif p.require_independent_support and not fus["supported_by"]:
+    current_support = any(source in fus["supported_by"] for source in ("sentinel1", "dynamic_world"))
+    if p.require_independent_support and not fus["supported_by"]:
         score = min(score, 50.0)
-        support["notes"].append("Single-source detection (Sentinel-2 only): no independent source supports it, so the score is capped at 50 and it cannot be HIGH.")
+        support["notes"].append("Single-source detection (Sentinel-2 only): unavailable sources earn no score weight; the score is capped at 50.")
+    if not current_support:
+        support["notes"].append("No current independent source supports the water-loss candidate; historical JRC context alone cannot establish current change.")
     evidence["support_assessment"] = support
     rec_verif = [
         "1. Cadastral Revenue Survey: Cross-reference flagged coordinates with Revenue Department FMB survey numbers to verify statutory wetland boundaries.",
@@ -285,16 +371,16 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
         "4. High-Resolution Validation: Review sub-metre commercial optical or UAV imagery prior to statutory action under Wetland Conservation Rules.",
     ]
     conf_rat = (
-        f"Review score {score:.0f}/100 derived from persistence ({comp['persistence']:.2f}), "
+        f"Heuristic review-priority score {score:.0f}/100 (not a probability) derived from persistence ({comp['persistence']:.2f}), "
         f"footprint core ({comp['footprint']:.2f}), coherence ({comp['spatial_coherence']:.2f}), "
         f"and magnitude ({comp['magnitude']:.2f}). Class {evidence['class']} indicates "
-        f"{'bare ground/fill spectral transition' if evidence['class'] == 'E2' else 'persistent open extent loss'}."
+        f"{'a bare/built-like spectral signal, not proof of fill' if evidence['class'] == 'E2' else 'persistent observed extent loss'}."
     )
     evidence.update(
         score_components=comp_rows,
         score_weight_coverage=ev_cov,
         limited_evidence=ev_cov < p.limited_evidence_floor,
-        method="Sentinel-2 L2A MNDWI multi-temporal persistence analysis with SCL cloud/shadow filtering and seasonal safeguard.",
+        method="Sentinel-2 L2A MNDWI persistence analysis with SCL cloud/shadow filtering and same-calendar-month baseline comparison.",
         confidence_rationale=conf_rat,
         recommended_verification=rec_verif,
     )
@@ -306,10 +392,11 @@ def _analyze(scenes, grid, p: EncroachParams, aoi_mask, as_of, supplementary_sce
                     "note": f"mean SWIR1 {swir_mean:.2f} (bare/built-like if > {p.bare_swir})"})
     if sar_corrob is not None:
         metrics.append({"indicator": "SAR corroboration (S1)", "value": f"{overall_vv:.1f} dB", "note": "VV backscatter over loss area"})
-    high = score >= p.high_score and seasonal_check and not fus["contradicted_by"] and (bool(fus["supported_by"]) or not p.require_independent_support)
+    high = (score >= p.high_score and seasonal_check and len(wet_rec) >= p.min_wet_scenes and
+            current_support and not fus["contradicted_by"])
     arrays.update(fus["arrays"])
     poly = attributed_polygons(loss, grid, fus)
     return Result(Pipeline.ENCROACH, State.HIGH if high else State.POTENTIAL,
-                  f"Potential encroachment indicator: {loss_ha:.1f} ha of persistent water-extent loss inside the historical footprint "
-                  f"({evidence['class']}). Requires reviewer and field confirmation; not a legal finding.", evidence, limitations,
+                  f"Observed water-extent loss candidate: {loss_ha:.1f} ha inside the historical footprint "
+                  f"({evidence['class']}). Satellite evidence does not confirm encroachment; reviewer and field confirmation are required.", evidence, limitations,
                   p.to_dict(), grid, arrays, "loss", poly, score, synthetic)

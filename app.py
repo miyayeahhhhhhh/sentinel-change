@@ -392,11 +392,13 @@ def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
             st.markdown("<div class='cs-card-title'>Seasonality Safeguard</div>", unsafe_allow_html=True)
             s_check = ev.get("seasonal_check")
             if s_check == "performed":
-                st.markdown("<span class='cs-tag' style='color:#166534;font-weight:700'>VERIFIED</span> Wet-season observations available in recent window.", unsafe_allow_html=True)
-                st.caption(f"Seasonal contraction ({ev.get('seasonal_ha', 0):.2f} ha, Class E3) successfully separated and suppressed from flagged loss.")
+                st.markdown("<span class='cs-tag' style='color:#166534;font-weight:700'>ASSESSED</span> Recent observations compared with baseline observations from the same calendar months.", unsafe_allow_html=True)
+                st.caption(f"Same-month footprint coverage: {ev.get('seasonal_comparison', {}).get('historical_footprint_coverage', 0):.0%}. Month matching reduces recurring seasonal confounding; it does not measure water level.")
+                if ev.get("wet_season_check") != "performed":
+                    st.caption("Recent wet-season observations are insufficient; this result cannot receive high-priority status. The seasonal profile is an unvalidated regional assumption.")
             else:
-                st.markdown("<span class='cs-tag' style='color:#991b1b;font-weight:700'>CAUTION</span> No wet-season observations in recent window.", unsafe_allow_html=True)
-                st.caption("Natural seasonal contraction cannot be ruled out. Review priority is capped below high-priority review.")
+                st.markdown("<span class='cs-tag' style='color:#991b1b;font-weight:700'>INSUFFICIENT</span> Same-month baseline comparison did not meet the coverage requirement.", unsafe_allow_html=True)
+                st.caption("The pipeline records this as unassessed; missing seasonal comparisons are not interpreted as no change.")
             st.markdown("</div>", unsafe_allow_html=True)
 
         # Analytical Indicators
@@ -640,6 +642,16 @@ def render_queue(actor: str) -> None:
             st.json(full_record, expanded=False)
 
         exp = json.loads(c["exports"])
+        baseline_cmp = Path(exp.get("baseline_matched_frequency_tif", ""))
+        recent_cmp = Path(exp.get("recent_matched_frequency_tif", ""))
+        if baseline_cmp.is_file() and recent_cmp.is_file():
+            st.markdown("#### Georeferenced before-and-after water-frequency comparison")
+            st.caption("Observed Sentinel-2 water frequency for calendar months shared by both periods. Both layers retain the exported CRS, transform, and pixel grid; this is derived evidence, not raw optical imagery.")
+            try:
+                comparison = mapview.build_frequency_comparison_map(baseline_cmp, recent_cmp)
+                st_folium(comparison, height=500, width="100%", returned_objects=[], key=f"frequency_comparison_{cid}")
+            except (ValueError, OSError) as exc:
+                st.warning(f"Georeferenced comparison is unavailable: {exc}")
         preview_path = Path(exp.get("preview_png", ""))
         if preview_path.is_file():
             st.markdown("#### Raster analysis preview")
@@ -848,7 +860,7 @@ polygon; map overlays are warped to Web Mercator so they align with the basemap.
 is computed from recorded provenance + checksum + geometry checks.
 
 ### Scores
-Heuristic review-priority scores (0-100), weights renormalised over available components, capped at 50 below 60% weight coverage. Not probabilities.
+Heuristic review-priority scores (0-100), unavailable evidence earns no score weight and coverage below 60% is capped at 50. Not probabilities.
 """)
     st.markdown("### System Capability Matrix")
     st.caption("Live status rows are generated from the registry, adapter status and the recorded run log.")

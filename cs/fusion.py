@@ -33,7 +33,18 @@ def fuse(loss: np.ndarray, outcomes: dict | None) -> dict:
     out = {"sources": {}, "components": {}, "supported_by": [], "contradicted_by": [], "arrays": {}, "limitations": []}
     if not loss.any():
         for k in ("sentinel1", "dynamic_world", "jrc_gsw"):
-            out["sources"][k] = {"status": "not_evaluated", "verdict": None, "reason": "no candidate loss"}
+            o = outcomes.get(k)
+            if isinstance(o, EvidenceLayer):
+                rec = {"status": "not_evaluated", "verdict": None, "reason": "no candidate loss",
+                       "source_status": "available", "provenance": o.provenance}
+            elif isinstance(o, Unavailable):
+                rec = {"status": "not_evaluated", "verdict": None, "reason": "no candidate loss",
+                       "source_status": o.status, "source_reason": o.reason, "provenance": o.provenance}
+            else:
+                rec = {"status": "not_evaluated", "verdict": None, "reason": "no candidate loss",
+                       "source_status": "not_requested"}
+            rec["candidate_evaluation"] = "not performed (no candidate loss)"
+            out["sources"][k] = rec
         return out
 
     def finish(key, layer, rec, verdict, comp_name=None, comp_val=None):
@@ -97,7 +108,7 @@ def fuse(loss: np.ndarray, outcomes: dict | None) -> dict:
             verdict = "contradicts" if seas >= 0.5 else ("supports" if perm >= 0.5 else "neutral")
             finish(key, o, {"coverage_of_candidate": round(cov, 3), "historically_permanent_share": round(perm, 3),
                             "historically_seasonal_share": round(seas, 3), "never_water_share": round(never, 3),
-                            "reading": "historically permanent water now lost" if verdict == "supports" else
+                            "reading": "candidate overlaps a historically permanent-water class (historical context only)" if verdict == "supports" else
                                        ("mostly historically seasonal water: normal variation plausible" if verdict == "contradicts" else "history inconclusive"),
                             "temporal_note": "historical reference only; coverage ends " + str(o.provenance.get("coverage_end") or "(not reported)")},
                    verdict, "historical_water", perm)

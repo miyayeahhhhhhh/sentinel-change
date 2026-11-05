@@ -1,0 +1,29 @@
+CHANGE SENTINEL — DEMO NARRATION
+Approx. 2:30–2:45 at a calm presentation pace
+
+SCENE 1 — THE CHALLENGE
+Waterbodies stretch across large areas, and tracking boundary changes by hand is slow. Satellite imagery helps surface persistent water-extent change. But a changing shoreline alone does not prove encroachment.
+
+SCENE 2 — INTRODUCING CHANGE SENTINEL
+Change Sentinel screens multi-date satellite observations and supporting evidence, then records results as traceable cases for human review. It is a decision-support tool, not a legal authority.
+
+SCENE 3 — LIVE CATALOG ACQUISITION
+This example uses the verified Hussain Sagar study area. In a catalog query recorded November fifth, 2026, 640 Sentinel-2 items were found. After cloud filtering, 287 candidates were read successfully; none failed. Accepted analysis observations span November ninth, 2022, to October fourteenth, 2026. The latest usable observation was 22 days old at analysis time. The query was live, but the imagery was not same-day.
+
+SCENE 4 — SEASON-MATCHED COMPARISON
+The pipeline compares recent observations with baseline observations from matching calendar months. This reduces recurring seasonal confounding. The georeferenced maps show observed-water frequency on the same EPSG:32644, 10-meter grid; they are derived rasters, not raw-color satellite images.
+
+SCENE 5 — OBSERVED CHANGE CANDIDATE
+Case E N C zero zero one two records 51.9 hectares of persistent water-extent loss candidate within a 209.29-hectare historical footprint. Another 28.98 hectares were classified as seasonally unmatched and suppressed. Boundary-area uncertainty is plus or minus 14.63 hectares. These measurements describe observed change, not construction.
+
+SCENE 6 — EVIDENCE FUSION
+Evidence is mixed. Sentinel-1 contradicts the candidate and still detects water in recent radar observations. Dynamic World also contradicts it, reporting a mean recent water probability of zero point seven. JRC supports historical-water context only; its record ends in 2020.
+
+SCENE 7 — UNCERTAINTY AND PRIORITY
+The case score is 50 out of 100. It is a heuristic review-priority score, not a probability. Current sources disagree, so the case remains potential change. No source confirms illegal encroachment.
+
+SCENE 8 — TRACEABLE CASE
+The stored case keeps observation dates, verified AOI provenance, source findings and geospatial exports. Reviewers can inspect the GeoTIFF and GeoJSON, record decisions and request field or cadastral verification.
+
+SCENE 9 — CLOSING
+Change Sentinel helps move satellite screening into traceable investigation while keeping uncertainty visible. From satellite observations to traceable waterbody investigations.

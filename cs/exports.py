@@ -31,11 +31,17 @@ def export_result(result: Result, case_id: str, outdir: Path) -> dict:
     out = mask.astype("uint8")
     out[~a["observed"].astype(bool)] = 255                  # unobserved = nodata, never "0"
     paths = {"change_mask_tif": d / "change_mask.tif", "coverage_tif": d / "coverage.tif",
+             "baseline_matched_frequency_tif": d / "baseline_matched_frequency.tif",
+             "recent_matched_frequency_tif": d / "recent_matched_frequency.tif",
              "polygons_geojson": d / "polygons.geojson", "evidence_json": d / "evidence.json",
              "preview_png": d / "preview.png"}
     write_geotiff(paths["change_mask_tif"], out, grid, nodata=255)
     write_geotiff(paths["coverage_tif"], a["coverage"].astype("float32"), grid, nodata=-1.0)
-    for k in ("change_mask_tif", "coverage_tif"):
+    for key, path_key in (("baseline_matched_frequency", "baseline_matched_frequency_tif"),
+                          ("recent_matched_frequency", "recent_matched_frequency_tif")):
+        values = np.where(np.isfinite(a[key]), a[key], -9999.0).astype("float32")
+        write_geotiff(paths[path_key], values, grid, nodata=-9999.0)
+    for k in ("change_mask_tif", "coverage_tif", "baseline_matched_frequency_tif", "recent_matched_frequency_tif"):
         if not check_geotiff(paths[k], grid):
             raise IOError(f"Exported raster {paths[k]} failed CRS/transform/shape validation")
     if result.polygons is not None:

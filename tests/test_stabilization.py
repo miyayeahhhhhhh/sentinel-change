@@ -51,7 +51,7 @@ def test_unrequested_sources_are_declared_and_carry_no_weight():
                                                                    "sensor_agreement", "image_quality", "recency", "corroboration",
                                                                    "landcover_transition", "historical_water"}
     unavailable = {c["name"]: c["available"] for c in r.evidence["score_components"]}
-    assert unavailable["corroboration"] is False and unavailable["sensor_agreement"] is False   # no SAR -> weight dropped, not zero-filled
+    assert unavailable["corroboration"] is False and unavailable["sensor_agreement"] is False   # no SAR -> unavailable weight is not earned
 
 
 def test_no_imagery_is_not_assessed_never_no_change():
