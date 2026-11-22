@@ -8,6 +8,8 @@ except ImportError:
 import dataclasses
 import json
 import os
+import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +19,8 @@ from streamlit_folium import st_folium
 from cs import mapview, registry as registry_mod, workflow
 from cs.config import SEASONAL_PROFILES, Settings, encroach_params_for
 from cs.db import DECISIONS, STATUSES, CaseStore
+from cs.auth import ADMIN, AuthError, AuthStore, REVIEWER
+from cs.confidence import estimate_detection_confidence
 from cs.imagery import NotConfigured
 from cs.models import DISCLAIMER, STATE_LABELS, State
 from cs.priority import queue_table, filter_queue_by_case_id, RANKING_RATIONALE
@@ -28,180 +32,90 @@ from cs import scope as scope_mod
 from cs.evidence import evidence_sources
 from cs.study_areas import STUDY_AREAS
 
-st.set_page_config(page_title="Change Sentinel | GIS Monitoring Console", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="The Change Sentinel | GIS Monitoring", layout="wide", initial_sidebar_state="expanded")
 
-# Professional GIS console stylesheet (neutral base, dark slate text, restrained blue accents, compact data density)
+# Earthy environmental-monitoring design system. Shared tokens keep the console practical and consistent.
 st.markdown("""<style>
-/* Root and main container */
+:root {
+    --cs-stone: #D8D6CF;
+    --cs-sand: #BEB18F;
+    --cs-taupe: #ADA58C;
+    --cs-olive: #5F6348;
+    --cs-olive-muted: #92936F;
+    --cs-earth: #A17F63;
+    --cs-canvas: #E8E6DE;
+    --cs-surface: #F8F6F0;
+    --cs-ink: #283126;
+    --cs-muted: #62665A;
+    --cs-line: #C9C5B7;
+}
 html, body, [class*="css"], .stApp {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    color: #0f172a !important;
-    background-color: #f8fafc !important;
+    font-family: "Source Sans 3", "Segoe UI", Arial, sans-serif;
+    color: var(--cs-ink) !important;
+    background: var(--cs-canvas) !important;
 }
-.stApp {background: #f8fafc !important;}
-
-/* =========================================================
-   SIDEBAR VISIBILITY & HIGH-CONTRAST STYLING
-   ========================================================= */
-section[data-testid="stSidebar"] {
-    background-color: #ffffff !important;
-    border-right: 1px solid #cbd5e1 !important;
-}
-
-/* Force dark readable typography on all sidebar text */
-section[data-testid="stSidebar"] h1,
-section[data-testid="stSidebar"] h2,
-section[data-testid="stSidebar"] h3,
-section[data-testid="stSidebar"] h4,
-section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] span,
-section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] strong,
-section[data-testid="stSidebar"] label,
-section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
-section[data-testid="stSidebar"] [data-testid="stRadio"] label,
-section[data-testid="stSidebar"] [data-testid="stRadio"] label p,
-section[data-testid="stSidebar"] [data-testid="stRadio"] label span,
-section[data-testid="stSidebar"] [data-testid="stRadio"] div[data-testid="stMarkdownContainer"] p {
-    color: #0f172a !important;
-    font-weight: 500 !important;
-}
-
-/* Sidebar captions */
-section[data-testid="stSidebar"] .stCaption,
-section[data-testid="stSidebar"] .stCaption p,
-section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
-    color: #475569 !important;
-}
-
-/* Sidebar inputs */
-section[data-testid="stSidebar"] input {
-    background-color: #f1f5f9 !important;
-    color: #0f172a !important;
-    border: 1px solid #cbd5e1 !important;
-    border-radius: 3px !important;
-}
-
-/* Sidebar radio button items */
+.block-container { padding: 1.3rem 1.5rem 2.25rem; max-width: 1680px; }
+h1, h2, h3, h4 { color: var(--cs-ink) !important; font-weight: 600; letter-spacing: -0.012em; }
+h1 { font-size: 1.7rem !important; }
+h2 { font-size: 1.35rem !important; margin-top: 1.35rem !important; }
+section[data-testid="stSidebar"] { background: #E1DED3 !important; border-right: 1px solid var(--cs-line) !important; }
+section[data-testid="stSidebar"] * { color: var(--cs-ink); }
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p { color: var(--cs-muted) !important; }
+section[data-testid="stSidebar"] > div:first-child { padding: .85rem .7rem 1rem; }
+.cs-brand-box { background: #F4F1E8; border: 1px solid var(--cs-line); border-radius: 4px; padding: 13px 12px; margin: 0 0 .75rem; box-shadow: 0 1px 2px rgba(58,55,42,.05); }
+.cs-brand-row { display: flex; align-items: center; gap: 10px; }
+.cs-brand-logo { width: 40px; height: 40px; flex: 0 0 40px; }
+.cs-brand-name { color: var(--cs-ink) !important; font-size: 15px; font-weight: 700; line-height: 1.12; letter-spacing: -.01em; }
+.cs-brand-subtitle { color: var(--cs-muted) !important; font-size: 10px; line-height: 1.35; margin-top: 3px; letter-spacing: .02em; }
+.cs-sidebar-label { color: var(--cs-earth) !important; font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; margin: 0 0 5px; }
+.cs-account { display: flex; align-items: center; gap: 8px; background: #EEECE4; border: 1px solid #D3CFC1; border-radius: 3px; padding: 8px; margin: 3px 0 7px; }
+.cs-avatar { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--cs-olive); color: #fff !important; font-size: 11px; font-weight: 700; }
+.cs-account-name { color: var(--cs-ink) !important; font-size: 12px; font-weight: 650; line-height: 1.15; }
+.cs-account-role { color: var(--cs-muted) !important; font-size: 10px; margin-top: 1px; text-transform: uppercase; letter-spacing: .07em; }
+section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { border-color: var(--cs-line) !important; border-radius: 4px !important; background: rgba(248,246,240,.48) !important; box-shadow: 0 1px 2px rgba(58,55,42,.04); }
 section[data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] > label {
-    padding: 6px 8px !important;
-    border-radius: 4px !important;
-    margin-bottom: 2px !important;
-    background: transparent;
+    padding: 7px 9px; margin: 1px 0; border-radius: 3px; border-left: 3px solid transparent;
 }
-section[data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] > label:hover {
-    background: #f1f5f9 !important;
-}
-
-/* Dividers */
-section[data-testid="stSidebar"] hr {
-    border-color: #e2e8f0 !important;
-}
-
-/* =========================================================
-   MAIN CONSOLE STYLING
-   ========================================================= */
-.block-container {
-    padding-top: 1.0rem;
-    padding-bottom: 2.0rem;
-    max-width: 1680px;
-}
-h1, h2, h3, h4 {
-    color: #0f172a !important;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-}
-.cs-header {
-    font-size: 13px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #334155 !important;
-    margin-bottom: 4px;
-}
-.cs-badge {
-    display: inline-block;
-    padding: 3px 9px;
-    border: 1px solid;
-    border-radius: 3px;
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-}
-.cs-tag {
-    display: inline-block;
-    padding: 2px 6px;
-    background: #edf2f7;
-    border: 1px solid #cbd5e1;
-    border-radius: 2px;
-    font-size: 11px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    color: #334155;
-}
-.cs-card {
-    background: #ffffff !important;
-    border: 1px solid #e2e8f0 !important;
-    border-radius: 3px;
-    padding: 12px 14px;
-    margin-bottom: 12px;
-}
-.cs-card * {
-    color: #0f172a;
-}
-.cs-card-title {
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: #475569 !important;
-    border-bottom: 1px solid #edf2f7;
-    padding-bottom: 4px;
-    margin-bottom: 8px;
-}
-.cs-note {
-    border: 1px solid #cbd5e1;
-    background: #ffffff;
-    padding: 9px 12px;
-    border-radius: 3px;
-    font-size: 12px;
-    line-height: 1.45;
-    color: #334155;
-    margin-top: 6px;
-    margin-bottom: 6px;
-}
-.cs-sample {
-    border: 1px solid #d97706;
-    background: #fffbeb;
-    padding: 6px 12px;
-    border-radius: 2px;
-    font-size: 11px;
-    font-weight: 600;
-    color: #92400e;
-    letter-spacing: 0.03em;
-    margin-bottom: 8px;
-}
-div[data-testid="stMetricValue"] {
-    font-size: 24px;
-    font-weight: 700;
-    color: #0f172a !important;
-}
-div[data-testid="stMetricValue"] * {
-    color: #0f172a !important;
-}
-.stDataFrame {
-    font-size: 12px;
-}
+section[data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] > label:hover { background: #D4D1C4; }
+section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) { background: #D5D6C3; border-left-color: var(--cs-olive); }
+section[data-testid="stSidebar"] [data-testid="stRadio"] input:checked + div { color: var(--cs-olive) !important; }
+section[data-testid="stSidebar"] hr, hr { border-color: var(--cs-line) !important; }
+.cs-header { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: var(--cs-earth) !important; margin: 2px 0 8px; }
+.cs-badge { display: inline-block; padding: 3px 8px; border: 1px solid; border-radius: 2px; font-size: 11px; font-weight: 650; letter-spacing: .025em; }
+.cs-tag { display: inline-block; padding: 2px 6px; background: #EEECE4; border: 1px solid var(--cs-line); border-radius: 2px; font: 11px ui-monospace, Consolas, monospace; color: var(--cs-muted); }
+.cs-card { background: var(--cs-surface) !important; border: 1px solid var(--cs-line) !important; border-radius: 3px; padding: 12px 14px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(58, 55, 42, .06); }
+.cs-card * { color: var(--cs-ink); }
+.cs-card-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--cs-earth) !important; border-bottom: 1px solid #DDD9CD; padding-bottom: 5px; margin-bottom: 8px; }
+.cs-note { border-left: 3px solid var(--cs-olive-muted); background: #F3F1E9; padding: 9px 12px; border-radius: 2px; font-size: 12px; line-height: 1.5; color: var(--cs-ink); margin: 8px 0; }
+.cs-sample { border: 1px solid #B99055; background: #F6EBD4; padding: 6px 10px; border-radius: 2px; font-size: 11px; font-weight: 650; color: #654B2D; letter-spacing: .025em; margin-bottom: 8px; }
+div[data-testid="stMetric"] { background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 3px; padding: 10px 12px; }
+div[data-testid="stMetricLabel"] p { color: var(--cs-muted) !important; font-size: 11px !important; letter-spacing: .035em; text-transform: uppercase; }
+div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] * { font-size: 23px; font-weight: 650; color: var(--cs-ink) !important; }
+div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, textarea { background: #FBFAF6 !important; border-color: var(--cs-line) !important; border-radius: 3px !important; color: var(--cs-ink) !important; }
+div[data-baseweb="input"] > div:focus-within, div[data-baseweb="select"] > div:focus-within { border-color: var(--cs-olive) !important; box-shadow: 0 0 0 1px var(--cs-olive) !important; }
+button[kind="primary"], div[data-testid="stFormSubmitButton"] button { background: var(--cs-olive) !important; border-color: var(--cs-olive) !important; color: #fff !important; border-radius: 3px !important; font-weight: 600 !important; }
+button[kind="primary"]:hover, div[data-testid="stFormSubmitButton"] button:hover { background: #4E523C !important; border-color: #4E523C !important; }
+button[kind="secondary"] { border-color: var(--cs-taupe) !important; color: var(--cs-ink) !important; border-radius: 3px !important; }
+div[data-testid="stDataFrame"] { border: 1px solid var(--cs-line); border-radius: 3px; overflow: hidden; }
+div[data-testid="stExpander"] { border: 1px solid var(--cs-line); border-radius: 3px; background: rgba(248,246,240,.7); }
+button[data-baseweb="tab"] { color: var(--cs-muted) !important; font-size: 12px !important; }
+button[data-baseweb="tab"][aria-selected="true"] { color: var(--cs-olive) !important; border-bottom-color: var(--cs-olive) !important; }
+div[data-testid="stProgressBar"] > div > div { background: var(--cs-olive-muted) !important; }
+div[data-testid="stAlert"] { border-radius: 3px; border-width: 1px; }
+@media (max-width: 760px) { .block-container { padding: 1rem .85rem 1.5rem; } div[data-testid="stMetric"] { padding: 8px; } .cs-brand-box { margin-bottom: .55rem; } }
 </style>""", unsafe_allow_html=True)
 
 SETTINGS = Settings.from_env()
 STORE = CaseStore(SETTINGS.db_path)
+AUTH = AuthStore(SETTINGS.db_path)
 
 # Accessible status colors and badge rendering
 COLORS = {
-    State.NO_CHANGE: {"color": "#166534", "bg": "#f0fdf4", "border": "#86efac"},
-    State.NOT_ASSESSED: {"color": "#334155", "bg": "#f8fafc", "border": "#94a3b8"},
-    State.FAILED: {"color": "#991b1b", "bg": "#fef2f2", "border": "#fca5a5"},
-    State.POTENTIAL: {"color": "#854d0e", "bg": "#fefce8", "border": "#fde047"},
-    State.HIGH: {"color": "#7f1d1d", "bg": "#fff1f2", "border": "#f43f5e"},
+    State.NO_CHANGE: {"color": "#36533A", "bg": "#E7EEE1", "border": "#9CAE8A"},
+    State.NOT_ASSESSED: {"color": "#555A50", "bg": "#EFEEE8", "border": "#BDBAAF"},
+    State.FAILED: {"color": "#8A3E35", "bg": "#F4E6E1", "border": "#CF998D"},
+    State.POTENTIAL: {"color": "#765A24", "bg": "#F4EBD3", "border": "#C9AA65"},
+    State.HIGH: {"color": "#714432", "bg": "#F1E3D9", "border": "#C59A82"},
 }
 
 
@@ -255,6 +169,29 @@ def _render_sources(ev: dict) -> None:
             prov = rec.get("provenance") or {}
             if prov:
                 st.json({kk: prov[kk] for kk in list(prov)[:12]}, expanded=False)
+
+
+def render_detection_confidence(res, case_id: str) -> None:
+    """Read-only confidence display derived after, never during, Run Analysis."""
+    estimate = estimate_detection_confidence(res.state.value, res.evidence)
+    st.markdown("<div class='cs-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='cs-card-title'>Estimated Detection Confidence</div>", unsafe_allow_html=True)
+    if estimate.score is None:
+        st.warning("Insufficient evidence to calculate confidence." if estimate.category == "Insufficient evidence" else estimate.rationale)
+    else:
+        st.metric("Estimated Detection Confidence", f"{estimate.score:.0f}%")
+        st.progress(int(round(estimate.score)))
+        st.write(f"**{estimate.category}**")
+    st.caption(f"Case: `{case_id}` · usable supporting observations: {estimate.observation_count} · evidence-group coverage: {estimate.coverage:.0%}")
+    st.caption(estimate.rationale)
+    if estimate.supporting:
+        st.write("**Supporting evidence:** " + "; ".join(estimate.supporting))
+    if estimate.conflicting:
+        st.warning("; ".join(estimate.conflicting))
+    if estimate.missing:
+        st.caption("Missing or unavailable evidence: " + "; ".join(estimate.missing) + ".")
+    st.caption("This is an evidence-strength estimate, not independently validated accuracy, a calibrated probability, or proof of encroachment.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
@@ -373,6 +310,7 @@ def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
             else:
                 st.write("Score: **None** (Analysis failed).")
         st.markdown("</div>", unsafe_allow_html=True)
+        render_detection_confidence(res, case_id)
 
         # Cross-Sensor Corroboration Card
         cs_ = ev.get("sensor_corroboration")
@@ -467,8 +405,6 @@ def render_workspace(actor: str, settings: Settings = SETTINGS) -> None:
                 st.markdown("<div class='cs-header' style='margin-top:10px'>Historical Water Footprint Persistence Series</div>", unsafe_allow_html=True)
                 st.caption("Ratio of baseline water footprint water-covered per usable pass (values near 1.0 = full extent, drops = retreat or dry season).")
                 st.line_chart(ts.set_index("date")["ref_wet_frac"], height=160)
-
-
 
 def render_dashboard(settings: Settings = SETTINGS) -> None:
     """Operational overview. Metrics are derived only from stored cases and registry records."""
@@ -577,7 +513,7 @@ def render_registry(settings: Settings) -> None:
                 "python -m cs.registry status", language="bash")
 
 
-def render_queue(actor: str) -> None:
+def render_queue(actor: str, is_admin: bool = False) -> None:
     st.markdown("<div class='cs-header'>Reviewer Verification Queue</div>", unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns([1.5, 2.5, 1.5])
@@ -737,38 +673,41 @@ def render_queue(actor: str) -> None:
                 width="stretch"
             )
 
-        # Sarvam AI native-language report + officer email workflow
-        st.markdown("#### Bilingual Officer Report (Sarvam AI)")
-        language_options = ["Telugu", "Hindi", "Marathi", "Tamil", "Kannada", "Bengali", "Gujarati", "Malayalam", "Punjabi", "Odia", "Urdu"]
-        language_name = st.selectbox("Native report language", language_options, index=0, key=f"native_lang_{cid}")
-        st.caption("Native-language text is MACHINE-TRANSLATED (Sarvam AI); the English PDF is authoritative.")
-        native_path = SETTINGS.output_dir / cid / f"{cid}_{LANGUAGES[language_name]}_report.docx"
-        if st.button("Generate native-language report with Sarvam AI", key=f"sarvam_report_{cid}"):
-            try:
-                with st.spinner("Generating machine-translated report with Sarvam AI..."):
-                    build_native_report(STORE, cid, native_path, language_name, LANGUAGES[language_name])
-                st.session_state[f"native_report_{cid}"] = native_path.read_bytes()
-                st.success(f"{language_name} report generated (machine-translated).")
-            except Exception as exc:
-                st.error(f"Sarvam report generation failed: {exc}")
-        if native_path.exists():
-            st.download_button("Download native-language report (machine-translated)", native_path.read_bytes(),
-                file_name=native_path.name,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key=f"download_native_{cid}")
-        blocks = scope_mod.email_block_reasons(c, STORE.decisions(cid))
-        officer_email = st.text_input("Officer e-mail (type the recipient; nothing is pre-filled)", value="", key=f"officer_email_{cid}",
-                                      placeholder="name@example.gov.in", disabled=bool(blocks))
-        if blocks:
-            st.warning("E-mail sending is disabled for this case: " + "; ".join(blocks) + ".")
-        confirmed = st.checkbox("I have reviewed the report and confirm this recipient may receive it", key=f"email_confirm_{cid}", disabled=bool(blocks))
-        if st.button("Send English PDF + native report to officer", key=f"send_report_{cid}", type="primary", disabled=bool(blocks)):
-            if not pdf_path.exists():
-                st.error("Generate the English PDF case file first.")
-            else:
-                extra = [str(native_path)] if native_path.exists() else []
-                ok, message = guarded_send(STORE, c, actor, officer_email, confirmed, str(pdf_path), extra)
-                (st.success if ok else st.error)(message)
+        # Authority-contact and e-mail operations are Admin-only.
+        if is_admin:
+            st.markdown("#### Bilingual Officer Report (Sarvam AI)")
+            language_options = ["Telugu", "Hindi", "Marathi", "Tamil", "Kannada", "Bengali", "Gujarati", "Malayalam", "Punjabi", "Odia", "Urdu"]
+            language_name = st.selectbox("Native report language", language_options, index=0, key=f"native_lang_{cid}")
+            st.caption("Native-language text is MACHINE-TRANSLATED (Sarvam AI); the English PDF is authoritative.")
+            native_path = SETTINGS.output_dir / cid / f"{cid}_{LANGUAGES[language_name]}_report.docx"
+            if st.button("Generate native-language report with Sarvam AI", key=f"sarvam_report_{cid}"):
+                try:
+                    with st.spinner("Generating machine-translated report with Sarvam AI..."):
+                        build_native_report(STORE, cid, native_path, language_name, LANGUAGES[language_name])
+                    st.session_state[f"native_report_{cid}"] = native_path.read_bytes()
+                    st.success(f"{language_name} report generated (machine-translated).")
+                except Exception as exc:
+                    st.error(f"Sarvam report generation failed: {exc}")
+            if native_path.exists():
+                st.download_button("Download native-language report (machine-translated)", native_path.read_bytes(),
+                    file_name=native_path.name,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key=f"download_native_{cid}")
+            blocks = scope_mod.email_block_reasons(c, STORE.decisions(cid))
+            officer_email = st.text_input("Officer e-mail (type the recipient; nothing is pre-filled)", value="", key=f"officer_email_{cid}",
+                                          placeholder="name@example.gov.in", disabled=bool(blocks))
+            if blocks:
+                st.warning("E-mail sending is disabled for this case: " + "; ".join(blocks) + ".")
+            confirmed = st.checkbox("I have reviewed the report and confirm this recipient may receive it", key=f"email_confirm_{cid}", disabled=bool(blocks))
+            if st.button("Send English PDF + native report to officer", key=f"send_report_{cid}", type="primary", disabled=bool(blocks)):
+                if not pdf_path.exists():
+                    st.error("Generate the English PDF case file first.")
+                else:
+                    extra = [str(native_path)] if native_path.exists() else []
+                    ok, message = guarded_send(STORE, c, actor, officer_email, confirmed, str(pdf_path), extra)
+                    (st.success if ok else st.error)(message)
+        else:
+            st.caption("Officer-contact, native report, and e-mail delivery operations require an Admin account.")
 
         # GeoTIFF change mask download
         tif_mask = Path(exp.get("change_mask_tif", ""))
@@ -869,49 +808,175 @@ Heuristic review-priority scores (0-100), unavailable evidence earns no score we
     st.dataframe(pd.DataFrame([
         ["CRS handling, UTM grid from polygon, polygon clipping, warped map overlays", "Unit-tested"],
         ["Case management, audit trail, PDF case file, GeoTIFF/GeoJSON/JSON exports", "Preserved and unit-tested"],
-        ["Authentication and role permissions", "Not implemented; operator label is audit attribution only"],
+        ["Authentication and role permissions", "Admin and Reviewer roles with local account management"],
         ["DEM / HAND masks, OSM exposure join, threshold calibration", "Not implemented (python -m cs.calibration reports detections vs reviewer decisions)"],
     ], columns=["Capability", "Implementation Status"]), hide_index=True, width="stretch")
-    st.caption("Authentication and role-based permissions are also a later milestone. The current operator label is for local audit attribution only, not identity verification.")
+    st.caption("Authentication and role-based permissions are enforced before application navigation. Analysis and case records remain unchanged.")
 
 
+def _session_user():
+    """Validate the short-lived Streamlit session against the persisted account."""
+    username = st.session_state.get("auth_username")
+    issued = st.session_state.get("auth_issued_at")
+    if not username or not issued:
+        return None
+    expiry = timedelta(seconds=int(os.getenv("CS_AUTH_SESSION_SECONDS", "1800")))
+    if datetime.now(timezone.utc) - issued > expiry:
+        st.session_state.pop("auth_username", None)
+        st.session_state.pop("auth_issued_at", None)
+        st.session_state.pop("auth_session_nonce", None)
+        return None
+    user = AUTH.get_user(username)
+    return user if user and user.active else None
+
+
+def render_login() -> None:
+    st.title("The Change Sentinel")
+    st.caption("Environmental intelligence · waterbody change monitoring")
+    if not AUTH.has_admin():
+        st.warning("No Admin account has been configured. A local administrator must run `python scripts/bootstrap_admin.py --username <name> --email <address>` on the host. Account setup is not available from this page.")
+        return
+    with st.form("login"):
+        username = st.text_input("Username", autocomplete="username")
+        password = st.text_input("Password", type="password", autocomplete="current-password")
+        submitted = st.form_submit_button("Sign in", type="primary")
+    if submitted:
+        user = AUTH.authenticate(username, password)
+        if user is None:
+            st.error("Invalid credentials, inactive account, or a temporary login lockout.")
+        else:
+            # A new nonce on login prevents reusing the previous in-process session state.
+            st.session_state["auth_username"] = user.username
+            st.session_state["auth_issued_at"] = datetime.now(timezone.utc)
+            st.session_state["auth_session_nonce"] = secrets.token_urlsafe(32)
+            st.rerun()
+
+
+def render_user_management(actor: str) -> None:
+    """Admin-only UI; AuthStore repeats this check for every mutation."""
+    try:
+        AUTH.require_admin(actor)
+    except AuthError:
+        st.error("Administrator permission is required.")
+        return
+    st.markdown("<div class='cs-header'>Administration → User Management</div>", unsafe_allow_html=True)
+    st.markdown("#### Create Reviewer")
+    with st.form("create_reviewer"):
+        username = st.text_input("Username", key="new_reviewer_username")
+        email = st.text_input("Email address", key="new_reviewer_email")
+        password = st.text_input("Password", type="password", key="new_reviewer_password")
+        confirm = st.text_input("Confirm password", type="password", key="new_reviewer_confirm")
+        st.text_input("Role", value="Reviewer", disabled=True)
+        submitted = st.form_submit_button("Create Reviewer", type="primary")
+    if submitted:
+        if password != confirm:
+            st.error("Passwords do not match.")
+        else:
+            try:
+                AUTH.create_reviewer(actor, username, email, password)
+                st.success("Reviewer account created.")
+            except AuthError as exc:
+                st.error(str(exc))
+    st.markdown("#### Reviewer accounts")
+    reviewers = AUTH.list_reviewers(actor)
+    if not reviewers:
+        st.info("No Reviewer accounts have been created.")
+        return
+    for reviewer in reviewers:
+        a, b, c = st.columns([2.5, 1.2, 1.5])
+        a.write(f"**{reviewer.username}**  \\n{reviewer.email}")
+        b.write("Active" if reviewer.active else "Inactive")
+        action = "Deactivate" if reviewer.active else "Reactivate"
+        if c.button(action, key=f"account_state_{reviewer.id}"):
+            AUTH.set_reviewer_active(actor, reviewer.username, not reviewer.active)
+            st.rerun()
+        with st.expander(f"Reset password for {reviewer.username}"):
+            with st.form(f"reset_{reviewer.id}"):
+                new_password = st.text_input("New password", type="password", key=f"reset_password_{reviewer.id}")
+                confirmation = st.text_input("Confirm new password", type="password", key=f"reset_confirm_{reviewer.id}")
+                if st.form_submit_button("Reset password"):
+                    if new_password != confirmation:
+                        st.error("Passwords do not match.")
+                    else:
+                        try:
+                            AUTH.reset_reviewer_password(actor, reviewer.username, new_password)
+                            st.success("Password reset. The new password is not retained or displayed.")
+                        except AuthError as exc:
+                            st.error(str(exc))
+
+
+user = _session_user()
+if user is None:
+    render_login()
+    st.stop()
+
+is_admin = user.role == ADMIN
 with st.sidebar:
-    st.markdown("### Change Sentinel")
-    st.caption("Waterbody Encroachment Monitoring - Hyderabad pilot")
-    page = st.radio("Navigation", ["Dashboard", "Pilot registry", "Analysis workspace", "Case management", "Methods and readiness"], label_visibility="collapsed", key="page_nav")
-    actor = st.text_input("Local operator label", "local_analyst", help="Audit attribution only. This is not a login or authentication mechanism.")
-    st.divider()
-
-    st.markdown("**Data Source Mode**")
-    mode_choice = st.radio("Provider Mode", ["Sample (Synthetic Fixtures)", "Live (Current Imagery + Evidence)"],
-                           index=0 if SETTINGS.mode == "sample" else 1,
-                           help="Sample uses deterministic test fixtures. Live queries current imagery and attempts the integrated independent evidence sources.")
-    current_mode = "live" if "Live" in mode_choice else "sample"
-    ACTIVE_SETTINGS = dataclasses.replace(SETTINGS, mode=current_mode)
-    if current_mode == "sample":
-        st.markdown("<div class='cs-sample'>MODE: SAMPLE (Synthetic Fixtures)</div>", unsafe_allow_html=True)
-    else:
-        st.markdown("<div class='cs-badge' style='color:#166534;background:#f0fdf4;border-color:#86efac;margin-bottom:6px'>MODE: LIVE (Real Sentinel-2 Data)</div>", unsafe_allow_html=True)
-        st.caption("Each run refreshes Sentinel-2, Sentinel-1, Dynamic World and JRC catalog/composite data when available. JRC is historical reference data.")
-
-    st.caption(f"Database: `{SETTINGS.db_path.name}`")
-    st.caption(f"Exports: `{SETTINGS.output_dir.name}/`")
-    st.divider()
+    st.markdown("""<div class="cs-brand-box">
+      <div class="cs-brand-row">
+        <svg class="cs-brand-logo" viewBox="0 0 48 48" role="img" aria-label="The Change Sentinel logo">
+          <circle cx="24" cy="24" r="19" fill="#E8E6DE" stroke="#5F6348" stroke-width="2"/>
+          <path d="M12 27c4-8 20-9 25-2-3 8-18 11-25 2Z" fill="#92936F"/>
+          <path d="M15 29c7 3 15 1 20-3" fill="none" stroke="#F8F6F0" stroke-width="1.5" stroke-linecap="round"/>
+          <circle cx="33" cy="14" r="3" fill="#A17F63"/>
+          <path d="M29.5 17.5 25 22M36.5 17.5 41 22" fill="none" stroke="#A17F63" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <div><div class="cs-brand-name">The Change Sentinel</div><div class="cs-brand-subtitle">Satellite-powered<br/>Waterbody Monitoring</div></div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+    navigation = ["Case management", "Methods and readiness"] if user.role == REVIEWER else ["Dashboard", "Pilot registry", "Analysis workspace", "Case management", "Methods and readiness", "Administration → User Management"]
+    nav_labels = {
+        "Dashboard": "□  Dashboard", "Pilot registry": "◇  Pilot Registry", "Analysis workspace": "⌁  Analysis Workspace",
+        "Case management": "▤  Case Management", "Methods and readiness": "i  Methods & Readiness",
+        "Administration → User Management": "⊞  Administration · User Management",
+    }
+    actor = user.username
+    with st.container(border=True):
+        st.markdown("<div class='cs-sidebar-label'>Navigation</div>", unsafe_allow_html=True)
+        page = st.radio("Navigation", navigation, format_func=lambda item: nav_labels[item], label_visibility="collapsed", key="page_nav")
+        st.divider()
+        if is_admin:
+            st.markdown("<div class='cs-sidebar-label'>Application controls</div>", unsafe_allow_html=True)
+            mode_choice = st.radio("Provider Mode", ["Sample (Synthetic Fixtures)", "Live (Current Imagery + Evidence)"],
+                                   index=0 if SETTINGS.mode == "sample" else 1,
+                                   help="Sample uses deterministic test fixtures. Live queries current imagery and attempts the integrated independent evidence sources.")
+            current_mode = "live" if "Live" in mode_choice else "sample"
+            ACTIVE_SETTINGS = dataclasses.replace(SETTINGS, mode=current_mode)
+            if current_mode == "sample":
+                st.markdown("<div class='cs-sample'>MODE: SAMPLE (Synthetic Fixtures)</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div class='cs-badge' style='color:#36533A;background:#E7EEE1;border-color:#9CAE8A;margin-bottom:6px'>MODE: LIVE (Real Sentinel-2 Data)</div>", unsafe_allow_html=True)
+                st.caption("Each run refreshes Sentinel-2, Sentinel-1, Dynamic World and JRC catalog/composite data when available. JRC is historical reference data.")
+            st.divider()
+        else:
+            ACTIVE_SETTINGS = SETTINGS
+        st.markdown("<div class='cs-sidebar-label'>Account</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='cs-account'><span class='cs-avatar'>{user.username[:1].upper()}</span><span><div class='cs-account-name'>{user.username}</div><div class='cs-account-role'>{user.role}</div></span></div>", unsafe_allow_html=True)
+        if st.button("Log out", width="stretch"):
+            for key in ("auth_username", "auth_issued_at", "auth_session_nonce", "page_nav"):
+                st.session_state.pop(key, None)
+            st.rerun()
+        st.caption(f"Database: `{SETTINGS.db_path.name}` · Exports: `{SETTINGS.output_dir.name}/`")
     st.caption("Satellite-derived indication of potential encroachment for human review. Contains modified Copernicus Sentinel data.")
 
-if page == "Dashboard":
+if page == "Dashboard" and is_admin:
     render_dashboard(ACTIVE_SETTINGS)
-elif page == "Pilot registry":
+elif page == "Pilot registry" and is_admin:
     render_registry(ACTIVE_SETTINGS)
-elif page == "Analysis workspace":
+elif page == "Analysis workspace" and is_admin:
     render_workspace(actor, ACTIVE_SETTINGS)
 elif page == "Case management":
-    render_queue(actor)
-else:
+    render_queue(actor, is_admin=is_admin)
+elif page == "Methods and readiness":
     render_methods()
+elif page == "Administration → User Management" and is_admin:
+    render_user_management(actor)
+else:
+    st.error("You do not have permission to access this page.")
 
 
-# Optional Neo4j graph access panel (added by neo4j-extension).
-from cs.neo4j_dashboard_extension import render_neo4j_panel
-with st.expander("Neo4j Knowledge Graph", expanded=False):
-    render_neo4j_panel()
+# Optional Neo4j graph access panel (added by neo4j-extension), Admin only.
+if is_admin:
+    from cs.neo4j_dashboard_extension import render_neo4j_panel
+    with st.expander("Neo4j Knowledge Graph", expanded=False):
+        render_neo4j_panel()

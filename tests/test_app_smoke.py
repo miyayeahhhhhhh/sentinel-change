@@ -9,7 +9,12 @@ def _run(page, monkeypatch, tmp_path):
     monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
     for key in ("CS_NEO4J_URI", "CS_NEO4J_USER", "CS_NEO4J_PASSWORD", "CS_SMTP_HOST", "CS_SMTP_FROM", "CS_ALERT_TO"):
         monkeypatch.delenv(key, raising=False)
+    from cs.auth import AuthStore
+    AuthStore(tmp_path / "a.db").bootstrap_admin("test.admin", "test.admin@example.org", "Strong-passphrase-2026!")
     at = AppTest.from_file("../app.py", default_timeout=120).run()
+    at.text_input[0].set_value("test.admin")
+    at.text_input[1].set_value("Strong-passphrase-2026!")
+    [b for b in at.button if b.label == "Sign in"][0].click().run()
     at.sidebar.radio[0].set_value(page).run()
     if page == "Analysis workspace":
         at.radio(key="target").set_value("Fixed grid (legacy / synthetic)").run()
@@ -34,10 +39,15 @@ def test_reviewer_queue_ui_flow(monkeypatch, tmp_path):
     monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
     for key in ("CS_NEO4J_URI", "CS_NEO4J_USER", "CS_NEO4J_PASSWORD", "CS_SMTP_HOST", "CS_SMTP_FROM", "CS_ALERT_TO"):
         monkeypatch.delenv(key, raising=False)
+    from cs.auth import AuthStore
+    AuthStore(tmp_path / "a.db").bootstrap_admin("test.admin", "test.admin@example.org", "Strong-passphrase-2026!")
     from cs.config import Settings
     from cs.workflow import execute_encroachment
     execute_encroachment(Settings.from_env(), "persistent_loss")
     at = AppTest.from_file("../app.py", default_timeout=120).run()
+    at.text_input[0].set_value("test.admin")
+    at.text_input[1].set_value("Strong-passphrase-2026!")
+    [b for b in at.button if b.label == "Sign in"][0].click().run()
     
     # 2. Sample cases for the queue are created in this isolated test database.
     at.sidebar.radio[0].set_value("Analysis workspace").run()
