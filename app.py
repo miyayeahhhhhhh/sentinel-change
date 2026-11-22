@@ -108,8 +108,7 @@ div[data-testid="stAlert"] { border-radius: 3px; border-width: 1px; }
 SETTINGS = Settings.from_env()
 STORE = CaseStore(SETTINGS.db_path)
 AUTH = AuthStore(SETTINGS.db_path)
-<<<<<<< HEAD
-=======
+
 
 # Auto-bootstrap initial admin on fresh deployment if none exists
 if not AUTH.has_admin():
@@ -117,7 +116,7 @@ if not AUTH.has_admin():
         AUTH.bootstrap_admin("admin", "admin@changesentinel.local", "Admin@123456")
     except Exception:
         pass
->>>>>>> 33e85d3 (final neo4j & sarvam draft)
+
 
 # Accessible status colors and badge rendering
 COLORS = {
