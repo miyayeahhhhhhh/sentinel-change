@@ -1,5 +1,6 @@
 # Change Sentinel — 
 running app: https://sentinel-change-miyayaya.streamlit.app/
+admin login: username: admin, password: Admin@123456
 
 Change Sentinel is a Streamlit geospatial monitoring application for screening **potential waterbody encroachment**. It is an evidence-review aid, not a legal determination or proof of unlawful activity.
 
