@@ -1,4 +1,5 @@
-# Change Sentinel — Base Application
+# Change Sentinel — 
+running app: https://sentinel-change-miyayaya.streamlit.app/
 
 Change Sentinel is a Streamlit geospatial monitoring application for screening **potential waterbody encroachment**. It is an evidence-review aid, not a legal determination or proof of unlawful activity.
 
